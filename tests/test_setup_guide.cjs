@@ -2494,4 +2494,3 @@ test('an unknown step reports itself instead of blanking the guide', async () =>
   assert.doesNotMatch(page.html, /Cannot read properties|is not a function|undefined \(reading/);
   assert.doesNotMatch(page.html, /暂时读不到设置进度/);
 });
-

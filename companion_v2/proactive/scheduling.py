@@ -56,6 +56,12 @@ DIAGNOSTIC_ENVIRONMENT_VARIANTS = {
     "external_news": ("news_events", "news_event", "外部资讯生产器"),
 }
 
+# Onboarding runs its diagnostic right after the administrator sends one private
+# message, so the turn can still be completing when the button is pressed.  A
+# bounded retry turns that transient race into a wait instead of a failure.
+DIAGNOSTIC_SETTLE_ATTEMPTS = 30
+DIAGNOSTIC_SETTLE_SECONDS = 1.0
+
 SYNTHETIC_DIAGNOSTIC_EVENTS = {
     "affection": "没有新用户消息，角色自己想起对方，想表达一点亲近；不假定对方也有同样感受。",
     "care": "角色想主动关心对方近况；没有材料表明对方正在难过或需要帮助，由角色先开口而不是等待求助。",
@@ -1032,6 +1038,45 @@ class ContactSchedule:
         return {"opportunity": opportunity, "intents": (ContactIntent(purpose, thought),),
                 "role_instruction": role_instruction, "route": route,
                 "diagnostic_origin": diagnostic_origin}
+
+    async def diagnostic_candidate_with_fallback(self, context, purpose, *, at=None, test_id=None,
+                                                 variant=None, role_instruction=None,
+                                                 settle_attempts=DIAGNOSTIC_SETTLE_ATTEMPTS,
+                                                 settle_seconds=DIAGNOSTIC_SETTLE_SECONDS):
+        """Diagnostic candidate for onboarding, with a synthetic fallback.
+
+        The guide must not dead-end before the administrator has completed one
+        private turn: without a ``conversation_batches`` or
+        ``conversation_native_turns`` row the source-backed producer can only
+        answer ``contact_diagnostic_source_required``, which is a technical code
+        with nothing the operator can act on.  The synthetic producer runs the
+        same real model, persona review and delivery, so the step still verifies
+        what it promises; only the cause of the contact is a one-shot scenario.
+
+        A turn that is still completing reports ``contact_conversation_changed``
+        rather than an unusable opportunity, so the source-backed probe is
+        retried for a bounded time before any fallback is considered.  Returns
+        ``(candidate, source_backed)``.
+        """
+        at = at or self.tasks.now()
+        failure = None
+        for attempt_no in range(max(1, int(settle_attempts))):
+            try:
+                candidate = await self.diagnostic_candidate(context, purpose, at=at,
+                                                            test_id=test_id, variant=variant)
+                return candidate, True
+            except TaskError as error:
+                failure = error
+                if error.code != "contact_conversation_changed":
+                    break
+                if attempt_no + 1 < max(1, int(settle_attempts)):
+                    await asyncio.sleep(settle_seconds)
+        if failure is not None and failure.code == "contact_diagnostic_source_required":
+            candidate = await self.synthetic_diagnostic_candidate(
+                context, purpose, at=at, test_id=test_id, variant=variant,
+                role_instruction=role_instruction)
+            return candidate, False
+        raise failure
 
     def validate_diagnostic_origin(self, context, origin, at, *, purpose=None, role_instruction=None):
         if type(origin) is not dict or type(origin.get("_diagnostic")) is not dict:

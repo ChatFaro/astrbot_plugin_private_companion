@@ -447,6 +447,59 @@ class PrivateCompanionV2StagingPlugin(Star):
         key = getattr(target, "key", None)
         return key if isinstance(key, str) and key else None
 
+    @staticmethod
+    def _route_shape(event):
+        """The routing fields that decide whether an inbound belongs to a target.
+
+        Deliberately excludes message text, media and credentials: an operator
+        needs to compare these identifiers with the configured target, nothing
+        more.  All values are truncated so one odd platform cannot flood a line.
+        """
+        def call(fn, fallback=""):
+            try:
+                value = fn() if callable(fn) else fn
+            except Exception:
+                return fallback
+            return value if isinstance(value, str) else fallback
+
+        message_obj = getattr(event, "message_obj", None)
+        session = getattr(event, "session", None)
+        shape = (
+            call(getattr(event, "get_platform_name", ""))[:48],
+            call(getattr(event, "get_self_id", ""))[:48],
+            call(getattr(getattr(message_obj, "type", None), "value", ""))[:32],
+            call(getattr(session, "platform_id", ""))[:48],
+            call(getattr(session, "session_id", ""))[:96],
+            call(getattr(event, "unified_msg_origin", ""))[:192],
+        )
+        return shape if any(shape) else None
+
+    def _observe_unclaimed_route(self, event) -> None:
+        """Say once per distinct route why an inbound matched no configured target.
+
+        Without this, "the plugin does not answer" cannot be told apart from
+        "the event callback never fired": a bound target and a silent mismatch
+        produce identical logs (issue #620).  Bounded to one line per route and
+        twenty routes per process, so a plugin that simply is not configured for
+        a platform cannot fill the console.
+        """
+        try:
+            if not self.staging_enabled():
+                return
+            seen = getattr(self, "_unclaimed_routes", None)
+            if seen is None:
+                seen = self._unclaimed_routes = set()
+            shape = self._route_shape(event)
+            if shape is None or shape in seen or len(seen) >= 20:
+                return
+            seen.add(shape)
+            logger.info(
+                "[CompanionV2] 入站未匹配任何已配置目标（每条路由只记一次）"
+                " platform=%s self_id=%s kind=%s session_platform=%s session=%s umo=%s",
+                *shape)
+        except Exception:
+            pass
+
     def _claims_target(self, event) -> bool:
         """Whether this exact event resolves to one of the configured targets.
 
@@ -799,6 +852,9 @@ class PrivateCompanionV2StagingPlugin(Star):
         if not self.staging.claims(event):
             # 不是本插件的目标：这条消息从来没有进入它的预期范围，回复与否都不是
             # 它的失败，既不写台账也不出日志——平台日志不该被别人的群消息刷屏。
+            # 但「一条路由都没匹配上」和「回调根本没触发」在日志里长得一模一样，
+            # 所以每条不同路由只记一次标识字段，供运维比对目标配置。
+            self._observe_unclaimed_route(event)
             if self._claims_target(event):
                 if self.staging_enabled():
                     # 目标确实是本插件的，只是这一刻没能受理（停机中、会话不在运行、

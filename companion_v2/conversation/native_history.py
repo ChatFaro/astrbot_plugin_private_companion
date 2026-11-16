@@ -28,10 +28,23 @@ def reference_key(ref):
     return ref["kind"], ref["observation_id"]
 
 
-def rows(runtime, context, *, start=None, end=None, kind=None, limit=32):
-    if not observations_available(runtime):
+def sends_available(runtime):
+    """Whether the optional send-receipt table exists.
+
+    Probing ``sqlite_master`` is a catalog query, and the per-row path used to
+    repeat it for every observation it validated.  Callers that read several rows
+    probe once and pass the answer down.
+    """
+    return runtime.read_one(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_native_sends'", ()) is not None
+
+
+def rows(runtime, context, *, start=None, end=None, kind=None, limit=32,
+         has_sends=None, available=None):
+    if not (observations_available(runtime) if available is None else available):
         return ()
-    has_sends = runtime.read_one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_native_sends'", ()) is not None
+    if has_sends is None:
+        has_sends = sends_available(runtime)
     timestamp = "COALESCE(s.sent_at, n.observed_at)" if has_sends else "n.observed_at"
     where = ["n.context_key = ?", "n.delivery_state IN ('input_observed', 'send_returned')"]
     values = [context.key]
@@ -50,9 +63,9 @@ def rows(runtime, context, *, start=None, end=None, kind=None, limit=32):
     return runtime.read_all(query, (*values, limit))
 
 
-def body(messages, ref, context, at, *, historical=False):
+def body(messages, ref, context, at, *, historical=False, available=None, has_sends=None):
     reference_key(ref)
-    if not observations_available(messages.runtime):
+    if not (observations_available(messages.runtime) if available is None else available):
         raise TaskError("native_history_unavailable", "native history is unavailable")
     row = messages.runtime.read_one("SELECT * FROM conversation_native_observations WHERE observation_id=?",
                                     (ref["observation_id"],))
@@ -78,9 +91,11 @@ def body(messages, ref, context, at, *, historical=False):
     if row["kind"] == "input":
         return {"role": "user", "received_at": row["observed_at"], "text": record.payload,
                 "owner": source.owner, **origin}
+    if has_sends is None:
+        has_sends = sends_available(messages.runtime)
     sent = (messages.runtime.read_one("SELECT sent_at FROM conversation_native_sends WHERE observation_id=?",
                                      (row["observation_id"],))
-            if messages.runtime.read_one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_native_sends'", ()) else None)
+            if has_sends else None)
     sent_at = sent["sent_at"] if sent else row["observed_at"]
     if sent_at > stamp(at):
         raise TaskError("native_history_changed", "the native send is later than this observation")
@@ -113,16 +128,24 @@ def dialogue(messages, context, at, *, start=None, end=None, limit=32, max_chars
         include_turns = True
     budget = max(1, limit)
     fetch = budget * MAX_TURN_BUBBLES if collapse_turns else budget
+    # One catalog probe for the whole read: both the row query and every row's
+    # validation used to re-ask sqlite_master whether the optional receipt table
+    # exists, which is a query per row on the hottest per-turn path.
+    runtime = messages.runtime
+    available = observations_available(runtime)
+    has_sends = sends_available(runtime) if available else False
     result = []
     remaining = max_chars
     # Apply the text budget from the latest messages backwards. Reading in
     # chronological order first could spend the whole budget on older inputs
     # and silently omit the assistant's latest care/recovery feedback.
-    for row in rows(messages.runtime, context, start=start, end=end, limit=fetch):
+    for row in rows(runtime, context, start=start, end=end, limit=fetch,
+                    available=available, has_sends=has_sends):
         if remaining <= 0 or (collapse_turns and len(result) >= budget):
             break
         try:
-            item = body(messages, reference(row), context, at)
+            item = body(messages, reference(row), context, at,
+                        available=available, has_sends=has_sends)
         except (TaskError, ValueError, KeyError, TypeError):
             continue
         text = str(item.get("text", "")).strip()

@@ -99,7 +99,11 @@ class AccountSessionWebAPI:
             # is shared by several Bot accounts on one role id in the editor too.
             # The controller already holds the parsed settings; only reparse when
             # the host has not assembled them yet.
-            parsed = controller.settings
+            # The next line already tolerates "not assembled yet" and "no
+            # personas", so read the attribute the same way: a controller that
+            # has not loaded its settings (or a lighter host shim) used to raise
+            # AttributeError here instead of falling back to a fresh parse.
+            parsed = getattr(controller, "settings", None)
             if parsed is None or not hasattr(parsed, "personas"):
                 parsed = MultiHostSettings.parse(controller.config)
             personas = [asdict(mapping) for mapping in parsed.personas]

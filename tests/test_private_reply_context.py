@@ -101,6 +101,43 @@ class PrivateReplyContextTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         # Every bubble survives, in the order it was actually sent.
         self.assertEqual(replies[0]["text"], "第一段内容。\n第二段内容。\n第三段内容。")
 
+    async def test_one_capture_probes_the_catalog_instead_of_every_row(self):
+        """The per-turn material read must not ask sqlite_master once per row.
+
+        This path runs on every private turn.  It used to re-probe the optional
+        receipt table for the row query and again for every row it validated; the
+        probe is now hoisted, so a regression here shows up as a jump in catalog
+        queries rather than as a vague slowdown.
+        """
+        _, first = await self.prepare("讲个长故事", "catalog-first")
+        self.clock.advance(timedelta(seconds=3))
+        for bubble in ("第一段。", "第二段。", "第三段。", "第四段。"):
+            await self.sent(first, bubble)
+            self.clock.advance(timedelta(seconds=3))
+        _, current = await self.prepare("继续", "catalog-current")
+
+        runtime = self.app.messages.runtime
+        probes = []
+        real_one, real_all = runtime.read_one, runtime.read_all
+        def one(sql, *args, **kwargs):
+            if "sqlite_master" in str(sql):
+                probes.append(sql)
+            return real_one(sql, *args, **kwargs)
+        def all_(sql, *args, **kwargs):
+            if "sqlite_master" in str(sql):
+                probes.append(sql)
+            return real_all(sql, *args, **kwargs)
+        from unittest.mock import patch
+        with patch.object(runtime, "read_one", one), patch.object(runtime, "read_all", all_):
+            material = self.capture(current)
+
+        replies = [item for item in material["before_input"] if item["speaker"] == "assistant"]
+        self.assertEqual(len(replies), 1, replies)
+        # Two dialogue reads (before_input / after_input), two probes each: one for
+        # the observations table, one for the optional receipt table.  Anything
+        # that grows with the row count is the regression this guards.
+        self.assertLessEqual(len(probes), 4, probes)
+
     async def test_drafts_stay_out_and_provider_context_is_temporary_and_refreshed(self):
         _, first = await self.prepare("来张自拍看看", "draft-first")
         self.clock.advance(timedelta(seconds=5))

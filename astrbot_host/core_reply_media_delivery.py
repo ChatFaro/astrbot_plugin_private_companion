@@ -20,6 +20,10 @@ _DECORATION = (Reply, At, AtAll)
 # ``&&angry&&``-style tokens.  They are internal markers, never user-facing.
 _EMOTION_MARKER = re.compile(r"&&[A-Za-z][A-Za-z0-9_:-]{0,32}&&")
 
+# Platforms on which text and media cannot share one message.  A voice bubble must
+# therefore be sent as its own payload, or the platform renders only the media.
+_SEPARATE_RECORD_PLATFORMS = frozenset({"aiocqhttp", "qq_official", "qq_official_webhook"})
+
 
 def _without_emotion_markers(chain):
     cleaned = []
@@ -60,7 +64,12 @@ def native_reply_messages(event, message):
         return (message,)
     chain = _without_emotion_markers(chain)
     getter = getattr(event, "get_platform_name", None)
-    qq = callable(getter) and getter() == "aiocqhttp"
+    # Platforms whose adapter turns a payload containing a Record into one rich
+    # media message (QQ ``msg_type`` 7) and then drops the text from it: the reply
+    # arrives as voice only, with the words gone.  ``qq_official`` belongs here for
+    # exactly the same reason as ``aiocqhttp`` -- leaving it out meant enabling
+    # voice hid every reply's text on the official bot (issue #638).
+    qq = callable(getter) and getter() in _SEPARATE_RECORD_PLATFORMS
     groups, current = [], []
     for part in chain:
         reaction = getattr(part, "_companion_v2_reaction_attachment", None)

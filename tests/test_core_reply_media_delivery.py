@@ -73,6 +73,19 @@ class NativeReplyMessagesTests(unittest.TestCase):
 
         self.assertEqual(kinds(groups), [[Record], [Record], [Reply, Plain]])
 
+    def test_the_official_qq_bot_splits_voice_from_its_text(self):
+        """qq_official renders a payload carrying a Record as rich media only.
+
+        Its adapter turns such a payload into one ``msg_type`` 7 message and drops
+        the text, so enabling voice made every reply arrive as voice with no words
+        at all (issue #638).  Both official adapters need the split that
+        ``aiocqhttp`` already had.
+        """
+        for platform in ("qq_official", "qq_official_webhook"):
+            chain = MessageChain(chain=[Plain("晚上好呀。"), Record(file=silent_wav())])
+            groups = native_reply_messages(_Event(platform), chain)
+            self.assertEqual(kinds(groups), [[Plain], [Record]], platform)
+
     def test_non_qq_platforms_keep_one_payload(self):
         chain = MessageChain(chain=[Reply(id="4601"), Record(file=silent_wav()), Plain("你好")])
         groups = native_reply_messages(_Event("telegram"), chain)

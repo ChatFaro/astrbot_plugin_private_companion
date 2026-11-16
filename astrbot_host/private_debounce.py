@@ -147,9 +147,20 @@ class PrivateDebounce:
             self._log_followups(pending)
         return Reservation(pending, ticket)
 
+    # ``At`` is allowed next to the body.  The QQ official adapter prepends
+    # ``At(qq="qq_official")`` to every private message it delivers, so demanding
+    # an all-``Plain`` chain silently disabled continuous-input debounce on that
+    # whole platform while the panel still reported it as enabled (issue #638).
+    _TEXT_ONLY_PART_KINDS = frozenset({"Plain", "At"})
+
     @staticmethod
     def private_plain_text(event):
-        """Return text only when the complete native private message is Plain."""
+        """Return the body of a text-only private message, or None.
+
+        Decorations (``At``) are ignored; anything that carries real content —
+        an image, voice, file or quote — makes this message ineligible, because
+        merging it would drop that content from the model's view.
+        """
         message_obj = getattr(event, "message_obj", None)
         kind = getattr(getattr(message_obj, "type", None), "value",
                        getattr(message_obj, "type", None))
@@ -163,29 +174,56 @@ class PrivateDebounce:
             return None
         texts = []
         for part in parts:
-            kind = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
+            name = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
+            if name == "At":
+                continue
             text = getattr(part, "text", None)
-            if kind != "Plain" or not isinstance(text, str):
+            if name != "Plain" or not isinstance(text, str):
                 return None
             texts.append(text)
+        if not texts:
+            # Decoration only: there is no body to merge.
+            return None
         text = "".join(texts)
         return text if text.strip() else None
 
     @staticmethod
     def replace_private_plain_text(event, text):
-        """Replace only the body while retaining the latest native event identity."""
+        """Replace only the body while retaining the latest native event identity.
+
+        The body is located explicitly instead of being assumed to be the first
+        part: on QQ official the first part is the injected ``At``, and writing
+        the merged text there produced a mention with no message.
+        """
         message_obj = getattr(event, "message_obj", None)
         try:
             parts = tuple(message_obj.message)
         except (AttributeError, TypeError):
             return False
-        if not parts or any(
-                getattr(getattr(part, "type", None), "value", getattr(part, "type", None)) != "Plain"
-                or not isinstance(getattr(part, "text", None), str) for part in parts):
+        if not parts:
+            return False
+        body = []
+        placed = False
+        for part in parts:
+            name = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
+            if name == "At":
+                body.append(part)
+                continue
+            if name != "Plain" or not isinstance(getattr(part, "text", None), str):
+                return False
+            if placed:
+                # Several body parts collapse into the one merged body.
+                continue
+            try:
+                part.text = text
+            except (AttributeError, TypeError):
+                return False
+            body.append(part)
+            placed = True
+        if not placed:
             return False
         try:
-            parts[0].text = text
-            message_obj.message = [parts[0]]
+            message_obj.message = body
             message_obj.message_str = text
             event.message_str = text
         except (AttributeError, TypeError):

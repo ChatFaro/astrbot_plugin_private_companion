@@ -42,6 +42,67 @@ class PrivateDebounceConfigurationTests(unittest.TestCase):
                 private_debounce_settings(values)
 
 
+class _Part:
+    """A native message part: only ``type``/``text`` are ever read."""
+
+    def __init__(self, name, text=None):
+        self.type = type("ComponentType", (), {"value": name})()
+        if text is not None:
+            self.text = text
+
+
+class _Message:
+    def __init__(self, parts, kind="FriendMessage"):
+        self.type = type("MessageType", (), {"value": kind})()
+        self.message = list(parts)
+        self.message_str = ""
+
+
+class _Event:
+    def __init__(self, parts, kind="FriendMessage"):
+        self.message_obj = _Message(parts, kind)
+        self.message_str = ""
+
+
+class PrivatePlainTextTests(unittest.TestCase):
+    def test_a_mention_injected_by_the_platform_still_debounces(self):
+        """QQ official prepends At to every private message it delivers.
+
+        Requiring an all-Plain chain therefore disabled continuous-input debounce
+        on that whole platform while the panel still said it was on (issue #638),
+        and nothing was logged because the skip happens before any debounce log.
+        """
+        event = _Event([_Part("At"), _Part("Plain", "煎蛋，开始了吗？")])
+        self.assertEqual(PrivateDebounce.private_plain_text(event), "煎蛋，开始了吗？")
+
+    def test_real_content_or_missing_body_is_still_ineligible(self):
+        self.assertIsNone(PrivateDebounce.private_plain_text(
+            _Event([_Part("Plain", "看图"), _Part("Image")])))
+        self.assertIsNone(PrivateDebounce.private_plain_text(_Event([_Part("At")])))
+        self.assertIsNone(PrivateDebounce.private_plain_text(_Event([_Part("Plain", "   ")])))
+        self.assertIsNone(PrivateDebounce.private_plain_text(
+            _Event([_Part("Plain", "群里")], kind="GroupMessage")))
+        self.assertIsNone(PrivateDebounce.private_plain_text(_Event([])))
+
+    def test_merging_writes_the_body_and_keeps_the_mention(self):
+        """The body is not the first part once a mention is prepended."""
+        event = _Event([_Part("At"), _Part("Plain", "第一条")])
+        self.assertTrue(PrivateDebounce.replace_private_plain_text(event, "第一条\n第二条"))
+
+        kinds = [part.type.value for part in event.message_obj.message]
+        self.assertEqual(kinds, ["At", "Plain"])
+        self.assertEqual(event.message_obj.message[1].text, "第一条\n第二条")
+        self.assertEqual(event.message_str, "第一条\n第二条")
+        # The merged body still round-trips, so the mention carries real text.
+        self.assertEqual(PrivateDebounce.private_plain_text(event), "第一条\n第二条")
+
+    def test_merging_still_collapses_a_multi_part_body(self):
+        event = _Event([_Part("Plain", "第一条"), _Part("Plain", "第二条")])
+        self.assertTrue(PrivateDebounce.replace_private_plain_text(event, "第一条\n第二条"))
+        self.assertEqual([part.type.value for part in event.message_obj.message], ["Plain"])
+        self.assertEqual(PrivateDebounce.private_plain_text(event), "第一条\n第二条")
+
+
 class PrivateDebouncePolicyTests(unittest.TestCase):
     def test_short_messages_wait_longer_than_long_messages(self):
         policy = Policy()

@@ -44,8 +44,14 @@ class ScopeStorageTests(unittest.TestCase):
                 'unknown-op', 'conversation', ?, 'onebot', 'private', 'window-a',
                 'unknown-op', 1, 'original-key', 'original-hash', 'unknown', 'unknown', ?, ?)
             """, (fixture.INSTALLATION, fixture.NOW.isoformat(), fixture.NOW.isoformat()))
-            connection.execute("INSERT INTO outbox VALUES ('unknown-outbox', 'unknown-op', 'part-1', 'hash', 'unknown', ?)",
-                               (fixture.NOW.isoformat(),))
+            # Name the columns: the fixture database is built from the current
+            # schema, where ``outbox`` already carries ``receipt_ref``. A
+            # values-only INSERT demands one value per physical column, so it
+            # broke the moment a column was added.
+            connection.execute(
+                "INSERT INTO outbox (outbox_id, operation_id, part_id, payload_hash, state, created_at)"
+                " VALUES ('unknown-outbox', 'unknown-op', 'part-1', 'hash', 'unknown', ?)",
+                (fixture.NOW.isoformat(),))
             connection.execute("""INSERT INTO sources VALUES (
                 'old-source', 'old-source', 1, 'conversation', ?, 'onebot', 'private', 'window-a',
                 ?, NULL, '[]', 'original-hash', 'old body', 'revoked', 3, ?, ?)
@@ -57,8 +63,13 @@ class ScopeStorageTests(unittest.TestCase):
     mutate = fixture.ObjectAccessStorageTests.mutate
 
     def rows(self):
+        # ``outbox`` gained ``receipt_ref`` after the V5 snapshot this test
+        # simulates. Compare the columns that existed then, so the assertion is
+        # about data preservation rather than about the tuple width.
+        projections = {"outbox": "SELECT outbox_id, operation_id, part_id, payload_hash, state, created_at FROM outbox"}
         with closing(sqlite3.connect(self.database)) as connection:
-            return {table: connection.execute('SELECT * FROM "' + table + '"').fetchall()
+            return {table: connection.execute(
+                        projections.get(table, 'SELECT * FROM "' + table + '"')).fetchall()
                     for table in ("agenda_memos", "agenda_reminders", "agenda_occurrences", "outbox")}
 
     def assert_unchanged(self):
@@ -118,8 +129,12 @@ class ScopeStorageTests(unittest.TestCase):
         self.assertEqual(runtime.read_one("PRAGMA foreign_keys", ())[0], 1)
         with self.assertRaises(sqlite3.IntegrityError):
             with runtime.transaction() as connection:
-                connection.execute("INSERT INTO outbox VALUES ('broken', 'missing-op', 'part', 'hash', 'pending', ?)",
-                                   (fixture.NOW.isoformat(),))
+                # Name the columns so the assertion below stays about the foreign
+                # key and not about how many columns ``outbox`` currently has.
+                connection.execute(
+                    "INSERT INTO outbox (outbox_id, operation_id, part_id, payload_hash, state, created_at)"
+                    " VALUES ('broken', 'missing-op', 'part', 'hash', 'pending', ?)",
+                    (fixture.NOW.isoformat(),))
         self.assertEqual(runtime.read_all("PRAGMA foreign_key_check", ()), ())
 
     def test_broken_old_reference_is_quarantined_before_migration(self):

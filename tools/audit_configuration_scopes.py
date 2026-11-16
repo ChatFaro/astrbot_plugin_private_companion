@@ -163,7 +163,16 @@ def inventory():
         if inspect.isclass(cls) and issubclass(cls, management.GroupEditor) and cls.group:
             editor = cls.__new__(cls)
             editor.context = context
-            targets[cls.group] = editor._target().layer.value
+            try:
+                layer = editor._target().layer
+            except AttributeError:
+                # WardrobeManagement / ReferenceManagement resolve their target
+                # through application-owned settings objects, which a bare
+                # instance does not carry.  The layer they would write is declared
+                # on the class itself, so read that instead of aborting the whole
+                # audit -- the two groups still need their fields checked.
+                layer = editor._target_layer()
+            targets[cls.group] = layer.value
     from companion_v2.conversation.perception_management import PerceptionManagement
     targets["conversation.presentation"] = ConfigLayer.ROLE.value
     targets["conversation.perception"] = inspect.signature(PerceptionManagement.__init__).parameters["layer"].default.value

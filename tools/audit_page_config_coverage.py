@@ -129,7 +129,43 @@ EXTERNAL_CONTROLS = {
     "person.learning": {
         "acquaintance_learning_enabled": "pages/关系与权限/member-editor.js",
     },
+    "proactive.contact": {
+        # 「生成方式」是主动联系页自己的下拉，不在通用工作台的 spec 里。
+        "generation_mode": "pages/陪伴小屋/contact-page.js",
+    },
 }
+
+# 同一个后端 group 按层拆成两张前端卡片时，字段分布在不同 spec 键上。
+# 只认主 spec 会把另一张卡上的字段报成「没有控件」，而且那张卡真被删掉时
+# 也不会变红——所以按这里合并后再断言，缺控件仍然会被抓出来。
+SPEC_SIBLINGS = {
+    # 安装层（陌生号处理）与角色层（新用户默认权限）各一张卡。
+    "private_access": ("private_access_installation",),
+}
+
+
+def merged_spec(spec, kind):
+    """主 spec 与同组兄弟卡片的控件声明合并成一份用于断言的视图。"""
+    entry = spec.get(kind)
+    if entry is None:
+        return None
+    siblings = [spec[name] for name in SPEC_SIBLINGS.get(kind, ())
+                if isinstance(spec.get(name), dict)]
+    if not siblings:
+        return entry
+    merged = dict(entry)
+    merged["order"] = [*entry.get("order", []),
+                       *(name for sibling in siblings for name in sibling.get("order", []))]
+    merged["labels"] = {**entry.get("labels", {}),
+                        **{key: value for sibling in siblings
+                           for key, value in sibling.get("labels", {}).items()}}
+    merged["inputs"] = {**entry.get("inputs", {}),
+                        **{key: value for sibling in siblings
+                           for key, value in sibling.get("inputs", {}).items()}}
+    merged["sections"] = [*entry.get("sections", []),
+                          *(section for sibling in siblings
+                            for section in sibling.get("sections", []))]
+    return merged
 
 
 def page_spec():
@@ -259,7 +295,7 @@ def main():
                 problems.append(f"分区 {kind} ({group}): 字段 {name} 没有专用控件声明")
             continue
 
-        entry = spec[kind]
+        entry = merged_spec(spec, kind)
         order = set(entry.get("order", []))
         labels = set(entry.get("labels", {}))
         sections = {name for section in entry.get("sections", []) for name in section["fields"]}

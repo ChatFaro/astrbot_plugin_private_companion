@@ -42,6 +42,17 @@ jobs:
           python -X utf8 -m unittest -q tests.test_release_secret_detection tests.test_native_release_version_guard tests.test_configuration_migration tests.test_reply_pipeline_regressions tests.test_image_configuration_migration tests.test_image_output_migration_guard tests.test_r1_image_protocol tests.test_r1_image_round1fix tests.test_proactive_diagnostic_routes tests.test_proactive_weather_change_events
           python -X utf8 -m unittest -q tests.test_remote_screen tests.test_screen_interpretation tests.test_screen_capture tests.test_screen_core_group
           node --test tests/test_page_route.cjs tests/test_models_page.cjs tests/test_qzone_config_mount.cjs tests/test_screen_access_page.cjs
+      # These two audits are the only automated statement that every registered
+      # configuration field has a control somewhere the operator can reach. They
+      # were never run by CI, and both had rotted: the coverage audit reported
+      # three phantom gaps (a layer-split card and a dedicated page it could not
+      # see) and the scope audit aborted on the first editor that resolves its
+      # target through the application. A red or crashing gate that nobody runs
+      # is the same as no gate.
+      - name: Check configuration surface coverage
+        run: |
+          python -X utf8 tools/audit_page_config_coverage.py
+          python -X utf8 tools/audit_configuration_scopes.py
       - name: Check weather provider contracts
         run: python -X utf8 -m unittest -q tests.test_qweather_weather_source tests.test_qweather_alert_source tests.test_weather_migration
       - name: Check native provider adapter contract

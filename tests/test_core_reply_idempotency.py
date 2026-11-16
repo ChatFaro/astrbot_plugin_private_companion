@@ -18,7 +18,7 @@ import unittest
 
 from tests import astrbot_data_root  # noqa: F401  (message components need the SDK)
 
-from astrbot.core.message.components import At, Image, Plain, Reply
+from astrbot.core.message.components import At, Image, Plain, Record, Reply
 from astrbot.core.message.message_event_result import MessageChain
 
 from astrbot_host.core_reply import (
@@ -28,6 +28,7 @@ from astrbot_host.core_reply import (
 from astrbot_host.core_reply_idempotency import (
     begin_core_reply_delivery_turn, remember_native_tool_message,
     should_drop_core_reply_duplicate, should_drop_native_tool_duplicate,
+    suppress_native_tool_body,
 )
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.outcome import Outcome
@@ -112,6 +113,42 @@ class ReplyDeliveryNetTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(should_drop_native_tool_duplicate(
             event, chain(BODY, At(qq="200"))))
+
+    def test_a_tool_send_with_its_voice_is_still_remembered_as_a_body(self):
+        """A voice attachment does not change what the user read (issue #663).
+
+        ``remember_native_tool_message`` used to key on plain-only payloads, so a
+        text+voice send recorded nothing at all; the final response then repeated
+        the same words, was segmented again and had its TTS synthesised a second
+        time.
+        """
+        event = DeliveryEvent()
+        event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"send_unknown": 0, "send_failed": 0})
+        remember_native_tool_message(event, MessageChain(chain=[Plain(BODY), Record(file="x")]))
+
+        result = MessageChain(chain=[Plain(BODY)])
+        self.assertTrue(suppress_native_tool_body(event, result))
+        self.assertEqual(list(result.chain), [])
+        self.assertFalse(suppress_native_tool_body(event, MessageChain(chain=[Plain(BODY)])),
+                         "only the first repeat is removed")
+
+    def test_whole_body_suppression_keeps_a_result_that_adds_media(self):
+        event = DeliveryEvent()
+        event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"send_unknown": 0, "send_failed": 0})
+        remember_native_tool_message(event, MessageChain(chain=[Plain(BODY), Record(file="x")]))
+
+        for result in (
+            MessageChain(chain=[Plain(BODY), Image.fromURL("https://example.invalid/a.png")]),
+            MessageChain(chain=[Plain(OTHER)]),
+            MessageChain(chain=[Plain(BODY), At(qq="200")]),
+        ):
+            self.assertFalse(suppress_native_tool_body(event, result))
+
+    def test_whole_body_suppression_respects_an_unknown_delivery(self):
+        event = DeliveryEvent()
+        event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"send_unknown": 1, "send_failed": 0})
+        remember_native_tool_message(event, MessageChain(chain=[Plain(BODY), Record(file="x")]))
+        self.assertFalse(suppress_native_tool_body(event, MessageChain(chain=[Plain(BODY)])))
 
     async def prepare(self, event=None, prepared=None, **kwargs):
         event = event or DeliveryEvent()

@@ -51,6 +51,10 @@ DELIVERY_NET_KEY = "_delivery_net"
 # assistant response can repeat exactly what the tool just sent; that is one
 # effect, not two messages.
 NATIVE_TOOL_KEYS_KEY = "_native_tool_sent_keys"
+# The same bodies as *visible text only*, so a tool send that carried its voice
+# attachment still records what the user actually read.  Compared once, before a
+# final result is segmented and voiced again (issue #663).
+NATIVE_TOOL_BODIES_KEY = "_native_tool_sent_bodies"
 # The identity the net is bound to.  Kept apart from the net so a missing reset
 # can never make the current turn read another turn's net.
 DELIVERY_TURN_KEY = "_delivery_turn"
@@ -60,6 +64,9 @@ DELIVERY_SEQUENCE_KEY = "_delivery_turn_sequence"
 # Component types that carry nothing but reply text.  Anything else is a different
 # delivery and is never treated as a repeat.
 TEXT_COMPONENTS = frozenset({"Plain", "At", "Reply"})
+# A voice bubble attached to the same body does not change what the user read, so
+# it does not change the body identity the final result is compared against.
+VOICE_COMPONENTS = frozenset({"Record"})
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +94,7 @@ def begin_core_reply_delivery_turn(event) -> bool:
     core[DELIVERY_TURN_KEY] = {"event_ref": event_ref, "sequence": sequence,
                                "snapshot": snapshot}
     core.pop(NATIVE_TOOL_KEYS_KEY, None)
+    core.pop(NATIVE_TOOL_BODIES_KEY, None)
     return True
 
 
@@ -135,12 +143,105 @@ def remember_native_tool_message(event, message) -> None:
         return
     key = _delivery_key(message)
     if key is None:
+        key = _body_key(message, allow_voice=True)
+    if key is not None:
+        keys = core.get(NATIVE_TOOL_KEYS_KEY)
+        keys = list(keys) if isinstance(keys, list) else []
+        if key not in keys:
+            keys.append(key)
+            core[NATIVE_TOOL_KEYS_KEY] = keys
+    # The visible body is remembered separately from its delivery shape: a send
+    # that carried its voice attachment has no plain delivery key, and without
+    # this the final result replying with the same words was delivered again --
+    # re-segmented and re-voiced (issue #663).
+    body = _body_key(message, allow_voice=True)
+    if body is None:
         return
-    keys = core.get(NATIVE_TOOL_KEYS_KEY)
-    keys = list(keys) if isinstance(keys, list) else []
-    if key not in keys:
-        keys.append(key)
-        core[NATIVE_TOOL_KEYS_KEY] = keys
+    bodies = core.get(NATIVE_TOOL_BODIES_KEY)
+    bodies = list(bodies) if isinstance(bodies, list) else []
+    if body not in bodies:
+        bodies.append(body)
+        core[NATIVE_TOOL_BODIES_KEY] = bodies
+
+
+def suppress_native_tool_body(event, result) -> bool:
+    """Drop a final result whose whole body the send tool already delivered.
+
+    Segmentation splits one reply into several platform messages and prepares
+    voice per segment, so comparing a single segment against the tool's whole
+    body can never match.  The duplicate has to be recognised once, here, before
+    either step runs.  Only an exact body + decoration match of a text-only
+    result is dropped, only once, and only while this turn's delivery is known
+    to have succeeded; a result that carries a picture, a voice of its own or a
+    different mention/quote is a different effect and is always delivered.
+    """
+    core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+    if not isinstance(core, dict) or core.get("send_unknown") or core.get("send_failed"):
+        return False
+    key = _body_key(_result_chain(result))
+    if key is None:
+        return False
+    bodies = core.get(NATIVE_TOOL_BODIES_KEY)
+    if not isinstance(bodies, list) or key not in bodies:
+        return False
+    bodies.remove(key)
+    core[NATIVE_TOOL_BODIES_KEY] = bodies
+    chain = getattr(result, "chain", None)
+    if isinstance(chain, list):
+        chain.clear()
+    elif chain is not None:
+        try:
+            result.chain = []
+        except (AttributeError, TypeError):
+            return False
+    logger.info("[CompanionV2] 工具已发送的整段正文不再重复 reason=native_tool_body "
+                "turn=%s event_ref=%s digest=%s",
+                _turn_label(core), _event_ref(core), _digest(key[0]))
+    return True
+
+
+def _result_chain(result):
+    """The sendable components of a final result, without inventing a shape."""
+    chain = getattr(result, "chain", None)
+    if isinstance(chain, (list, tuple)):
+        return chain
+    owner = getattr(result, "result_chain", None)
+    chain = getattr(owner, "chain", None)
+    return chain if isinstance(chain, (list, tuple)) else ()
+
+
+def _body_key(part, *, allow_voice=False):
+    """The visible body of one payload plus its ordered decorations.
+
+    Accepts either a payload object carrying ``chain`` or the component list
+    itself.  Media normally makes a payload something other than a body.
+    ``allow_voice`` is used only when *recording* what a tool send delivered,
+    where the voice is an attachment to the same words rather than a different
+    message.
+    """
+    components = getattr(part, "chain", None)
+    if not isinstance(components, (list, tuple)):
+        components = part if isinstance(part, (list, tuple)) else None
+    if not components:
+        return None
+    texts, decorations = [], []
+    for component in components:
+        name = getattr(getattr(component, "type", None), "name", None)
+        if name == "Plain":
+            texts.append(getattr(component, "text", "") or "")
+        elif name == "At":
+            decorations.append(("At", str(getattr(component, "qq", "")),
+                                str(getattr(component, "account", ""))))
+        elif name == "Reply":
+            decorations.append(("Reply", str(getattr(component, "id", ""))))
+        elif name in VOICE_COMPONENTS and allow_voice:
+            continue
+        else:
+            return None
+    text = "".join(texts)
+    if not text.strip():
+        return None
+    return (text, tuple(decorations))
 
 
 def should_drop_native_tool_duplicate(event, part) -> bool:

@@ -1805,6 +1805,17 @@ class PrivateCompanionV2StagingPlugin(Star):
         except Exception:
             pass
         self._adopt_core_reply_delivery(event)
+        # Last chance to see one whole reply: segmentation and voice preparation
+        # both run after this point, so a tool send the final result repeats has
+        # to be recognised here or the words and their TTS are produced twice.
+        try:
+            from .astrbot_host.core_reply_idempotency import suppress_native_tool_body
+            getter = getattr(event, "get_result", None)
+            result = getter() if callable(getter) else None
+            if result is not None:
+                suppress_native_tool_body(event, result)
+        except Exception:
+            pass
         activate_core_reply_delivery_guard(event)
         activate_core_reply_tracking(event)
         activate_core_reply_segmentation(event)

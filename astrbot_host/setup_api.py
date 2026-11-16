@@ -114,7 +114,7 @@ PROACTIVE_TEST_FAILURE_LABELS = {
     "contact_purpose_paused": ("purpose", "所选联系目的当前已暂停"),
     "contact_quiet_hours": ("settings", "当前处于免打扰时段"),
     "model_task_unregistered": ("model_route", "主动联系模型任务未配置"),
-    "contact_diagnostic_source_required": ("trusted_candidate", "当前用途没有可核验的测试机会"),
+    "contact_diagnostic_source_required": ("trusted_candidate", "还没有可用于测试的私聊记录，一次性合成测试事件也不可用"),
     "contact_diagnostic_source_changed": ("trusted_candidate", "诊断来源凭据已变化"),
     "contact_diagnostic_variant_invalid": ("trusted_candidate", "测试来源选择无效"),
     "contact_conversation_changed": ("trusted_candidate", "诊断来源会话在测试期间发生变化"),
@@ -1418,6 +1418,53 @@ class SetupWebAPI:
                 or PROACTIVE_TEST_STAGE_SUGGESTIONS.get(stage, "查看该阶段的宿主日志和当前配置，修复后使用新尝试验收。"),
             "replay_allowed": False, "stages": stages}
 
+    async def _proactive_test_candidate(self, producer, synthetic_producer, context, instruction,
+                                        *, attempt_id):
+        """Produce the onboarding test candidate, with a synthetic fallback.
+
+        The guide must not dead-end on a fresh install.  Until the administrator
+        has completed one private turn there is no ``conversation_batches`` /
+        ``conversation_native_turns`` row, so the source-backed producer answers
+        ``contact_diagnostic_source_required`` and step 8 showed a bare technical
+        code with nothing the operator could act on.  The synthetic producer is
+        the one 「主动与联系」 already uses: it still runs the real model, persona
+        review, media assembly and delivery, so this step keeps verifying exactly
+        what it claims — only the cause of the contact is a one-shot scenario.
+        Every other failure keeps its own diagnosis.
+        """
+        try:
+            return await self._source_backed_proactive_candidate(producer, context), True
+        except TaskError as error:
+            if error.code != "contact_diagnostic_source_required" or not callable(synthetic_producer):
+                raise
+            logger.info("[CompanionV2] 引导主动测试暂无已完成私聊轮次，改用一次性合成事件 attempt=%s",
+                        attempt_id)
+            candidate = await synthetic_producer(context, "chat", at=self.controller.now(),
+                test_id=attempt_id, role_instruction=instruction)
+            return candidate, False
+
+    async def _source_backed_proactive_candidate(self, producer, context):
+        """Read the real producer, waiting out a still-completing turn first.
+
+        The guide asks the administrator to send one private message immediately
+        before this test.  The new turn can still be completing when the button
+        is pressed; ``_origin`` then correctly reports
+        ``contact_conversation_changed``.  That is a transient race, not an
+        unusable test opportunity: wait briefly for the current turn to settle
+        and retry the same real producer.
+        """
+        for attempt_no in range(30):
+            try:
+                return await producer(context, "chat", at=self.controller.now())
+            except TaskError as error:
+                if error.code != "contact_conversation_changed" or attempt_no == 29:
+                    raise
+                if attempt_no % 5 == 0:
+                    logger.info("[CompanionV2] 主动测试等待当前私聊轮次完成 attempt=%s/30",
+                                attempt_no + 1)
+                await asyncio.sleep(1.0)
+        raise TaskError("contact_conversation_changed", "the current private turn never settled")
+
     async def _execute_proactive_test(self, username: str, attempt_id: str) -> None:
         attempt = None
         app = context = None
@@ -1443,7 +1490,7 @@ class SetupWebAPI:
                 value["receipt_ref"] = receipt_ref
             return value
         try:
-            session, context, _instruction = await self._test_context()
+            session, context, instruction = await self._test_context()
             app = session.application
             operator = dashboard_operator(self.controller.runtime, username, at=self.controller.now())
             manager = ContactManagement(app, context)
@@ -1465,26 +1512,9 @@ class SetupWebAPI:
                 raise TaskError("proactive_diagnostic_unavailable",
                                 "the active host has no source-backed proactive producer registry")
             try:
-                # The guide asks the administrator to send one private message
-                # immediately before this test.  The new turn can still be
-                # completing when the button is pressed; _origin then correctly
-                # reports contact_conversation_changed.  That is a transient
-                # race, not an unusable test opportunity: wait briefly for the
-                # current turn to settle and retry the same real producer.
-                candidate = None
-                for attempt_no in range(30):
-                    now = self.controller.now()
-                    try:
-                        candidate = await producer(context, "chat", at=now)
-                        break
-                    except TaskError as error:
-                        if error.code != "contact_conversation_changed" or attempt_no == 29:
-                            raise
-                        if attempt_no % 5 == 0:
-                            logger.info(
-                                "[CompanionV2] 主动测试等待当前私聊轮次完成 attempt=%s/30",
-                                attempt_no + 1)
-                        await asyncio.sleep(1.0)
+                candidate, source_backed = await self._proactive_test_candidate(
+                    producer, getattr(schedule, "synthetic_diagnostic_candidate", None),
+                    context, instruction, attempt_id=attempt_id)
             except TaskError:
                 stages.append({"stage": "trusted_candidate", "state": "failed"})
                 self.progress.record_proactive_test_progress(attempt_id=attempt_id, stages=stages)
@@ -1503,7 +1533,7 @@ class SetupWebAPI:
             attempt = (app, context, task_id)
             result = await app.proactive.contact(context, opportunity, intents,
                 role_instruction=candidate["role_instruction"], selection_seed=attempt_id,
-                administrator_test=True, diagnostic_source_backed=True,
+                administrator_test=True, diagnostic_source_backed=source_backed,
                 diagnostic_origin=candidate["diagnostic_origin"])
             if result.failure is not None:
                 failed_stage = PROACTIVE_TEST_FAILURE_LABELS.get(

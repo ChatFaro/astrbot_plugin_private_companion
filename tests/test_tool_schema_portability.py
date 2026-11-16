@@ -48,28 +48,72 @@ class PortableToolSchemaTests(unittest.TestCase):
         self.assertEqual(cleaned["properties"]["mode"], {"type": "string", "enum": ["a", "b"]})
         self.assertIsNone(has_non_string_enum(cleaned))
 
-    def test_cleaning_reaches_properties_items_and_every_combinator(self):
+    def test_cleaning_reaches_properties_and_items(self):
         source = {
             "type": "object",
             "properties": {
                 "pick": {"type": "array", "items": {"type": "integer", "enum": [1, 2]}},
                 "count": {"type": "integer", "minimum": 1},
             },
-            "anyOf": [{"type": "string", "enum": [3, 4]}],
-            "oneOf": [{"type": "number", "enum": [5]}],
-            "allOf": [{"type": "object", "properties": {"flag": {"type": "integer", "enum": [0, 1]}}}],
         }
 
         cleaned = portable_tool_schema(source)
 
         self.assertIsNone(has_non_string_enum(cleaned))
         self.assertEqual(cleaned["properties"]["pick"]["items"]["description"], "可选值：1、2")
-        self.assertEqual(cleaned["anyOf"][0]["description"], "可选值：3、4")
-        self.assertEqual(cleaned["oneOf"][0]["description"], "可选值：5")
-        self.assertEqual(cleaned["allOf"][0]["properties"]["flag"]["description"], "可选值：0、1")
         self.assertEqual(cleaned["properties"]["count"], {"type": "integer", "minimum": 1})
         # The cleaner works on a copy: the stored business schema is not rewritten.
         self.assertEqual(source["properties"]["pick"]["items"], {"type": "integer", "enum": [1, 2]})
+
+    def test_a_top_level_combinator_is_hoisted_into_the_description(self):
+        """Anthropic refuses a tool whose ``input_schema`` starts with anyOf/oneOf/allOf.
+
+        The requirement it carried must survive as prompt material, and the
+        declaration must no longer contain the keyword, or every Claude-backed
+        conversation fails while the request is still being built (issue #708).
+        """
+        cleaned = portable_tool_schema({
+            "type": "object",
+            "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+            "anyOf": [{"required": ["a"]}, {"required": ["b"]}],
+        })
+
+        for keyword in ("anyOf", "oneOf", "allOf"):
+            self.assertNotIn(keyword, cleaned)
+        self.assertEqual(cleaned["type"], "object")
+        self.assertIn("同时提供 a", cleaned["description"])
+        self.assertIn("同时提供 b", cleaned["description"])
+        self.assertIn("；或 ", cleaned["description"])
+
+    def test_a_top_level_anyOf_without_a_declared_type_still_becomes_an_object(self):
+        cleaned = portable_tool_schema({"anyOf": [{"required": ["a"]}, {"required": ["b"]}]})
+
+        self.assertNotIn("anyOf", cleaned)
+        self.assertEqual(cleaned["type"], "object")
+
+    def test_nested_combinators_are_cleaned_and_kept(self):
+        """Only the root is rewritten: a nested combinator is legal for every client."""
+        cleaned = portable_tool_schema({
+            "type": "object",
+            "properties": {
+                "value": {"anyOf": [{"type": "string"}, {"type": "integer", "enum": [3, 4]}]},
+            },
+        })
+
+        branches = cleaned["properties"]["value"]["anyOf"]
+        self.assertEqual(len(branches), 2)
+        self.assertEqual(branches[1], {"type": "integer", "description": "可选值：3、4"})
+        self.assertIsNone(has_non_string_enum(cleaned))
+
+    def test_a_combinator_free_root_schema_keeps_its_description(self):
+        cleaned = portable_tool_schema({
+            "type": "object",
+            "description": "Already portable.",
+            "properties": {"mode": {"type": "string", "enum": ["a"]}},
+            "required": ["mode"], "additionalProperties": False,
+        })
+
+        self.assertEqual(cleaned["description"], "Already portable.")
 
     def test_cleaning_an_already_portable_schema_changes_nothing(self):
         clean = {"type": "object", "properties": {"mode": {"type": "string", "enum": ["a"]}},

@@ -80,6 +80,14 @@ _SCHEDULE_SCHEMA = {
     "additionalProperties": False,
 }
 
+# reminder.create 的两种合法用法互斥，但只能写进说明：顶层 anyOf/oneOf/allOf
+# 会让 Anthropic 拒绝整轮工具的 input_schema（见 specification()）。
+REMINDER_CREATE_USAGE = (
+    "两种二选一用法，任选其一：①直接给时间——同时提供 schedule 与 message；"
+    "②关联已有便签——同时提供 memo_id 与 expected_memo_revision，且该便签自身已带时间。"
+    "两者都不满足时不要调用本工具。"
+)
+
 _FIELD_SCHEMAS = {
     "title": {"type": "string", "maxLength": 200, "description": "便签标题"},
     "body": {"type": "string", "description": "便签正文"},
@@ -112,27 +120,6 @@ class ToolSource:
             raise ValueError("source offer requires an exact original reference")
 
 
-def _schedule_schema():
-    return {
-        "type": "object",
-        "description": "Absolute local schedule: anchor must include a UTC offset, timezone_name is IANA.",
-        "properties": {
-            "anchor": {"type": "string", "format": "date-time",
-                       "description": "ISO-8601 timestamp with offset, e.g. 2026-11-03T07:55:00+08:00."},
-            "timezone_name": {"type": "string",
-                              "description": "IANA timezone such as Asia/Shanghai."},
-            "frequency": {"type": "string",
-                          "enum": ["once", "daily", "weekly", "monthly", "yearly"]},
-            "interval": {"type": "integer", "minimum": 1},
-            "count": {"type": "integer", "minimum": 1},
-            "fold": {"type": "integer", "enum": [0, 1]},
-            "gap_policy": {"type": "string", "enum": ["reject", "shift_forward"]},
-        },
-        "required": ["anchor", "timezone_name"],
-        "additionalProperties": False,
-    }
-
-
 def specification(action, required, optional=(), description="Use the original role's authorized local agenda."):
     properties = {key: dict(_FIELD_SCHEMAS.get(key, {})) for key in sorted(set(required) | set(optional))}
     if action in ("memo.create", "memo.list"):
@@ -149,10 +136,12 @@ def specification(action, required, optional=(), description="Use the original r
     if action == "reminder.create":
         # 两种合法用法：直接给时间提醒，或关联一条已经有时间的便签。
         # 不把 required 写死成其中一种，否则另一种调用会被 schema 直接拒绝。
-        schema["anyOf"] = [
-            {"required": ["schedule", "message"]},
-            {"required": ["memo_id", "expected_memo_revision"]},
-        ]
+        # 二选一**不能**用顶层 anyOf 表达：Anthropic 的 input_schema 顶层不接受
+        # anyOf/oneOf/allOf，写了以后每一轮请求都在本地构造期就失败（
+        # tools.N.custom.input_schema），所有走 Claude 的会话会整体失声。
+        # 这里把互斥关系交给 description，真正的强制在 agenda/models.Schedule
+        # 与 agenda/service 的业务校验里。
+        schema["description"] = REMINDER_CREATE_USAGE
     return ToolSpec(action, description, encode(schema))
 
 

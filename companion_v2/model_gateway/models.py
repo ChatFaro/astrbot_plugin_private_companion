@@ -209,13 +209,17 @@ class ToolCall:
 _CHILD_MAP_KEYWORDS = ("properties", "patternProperties", "definitions", "$defs")
 _CHILD_NODE_KEYWORDS = ("items", "not", "additionalProperties")
 _CHILD_LIST_KEYWORDS = ("anyOf", "oneOf", "allOf", "prefixItems")
+# Anthropic rejects these at the *top level* of a tool ``input_schema``:
+# ``input_schema does not support oneOf, allOf, or anyOf at the top level``.
+# Nested combinators are legal, so only the root is rewritten.
+_ROOT_COMBINATORS = ("anyOf", "oneOf", "allOf")
 
 
-def portable_tool_schema(schema):
+def portable_tool_schema(schema, *, _root=True):
     """Return a copy of one tool JSON Schema that every provider client can build."""
 
     if isinstance(schema, list):
-        return [portable_tool_schema(item) for item in schema]
+        return [portable_tool_schema(item, _root=_root) for item in schema]
     if not isinstance(schema, dict):
         return schema
     # Start from every other keyword unchanged and replace the nested positions
@@ -224,19 +228,58 @@ def portable_tool_schema(schema):
     for key in _CHILD_MAP_KEYWORDS:
         children = schema.get(key)
         if isinstance(children, dict):
-            result[key] = {name: portable_tool_schema(child) for name, child in children.items()}
+            result[key] = {name: portable_tool_schema(child, _root=False) for name, child in children.items()}
     for key in _CHILD_LIST_KEYWORDS:
         children = schema.get(key)
         if isinstance(children, list):
-            result[key] = [portable_tool_schema(child) for child in children]
+            result[key] = [portable_tool_schema(child, _root=False) for child in children]
     for key in _CHILD_NODE_KEYWORDS:
         child = schema.get(key)
         if isinstance(child, dict):
-            result[key] = portable_tool_schema(child)
+            result[key] = portable_tool_schema(child, _root=False)
         elif isinstance(child, list):
-            result[key] = [portable_tool_schema(item) for item in child]
+            result[key] = [portable_tool_schema(item, _root=False) for item in child]
+    if _root:
+        result = _hoist_root_combinators(result)
     result.update(_portable_enum(schema))
     return result
+
+
+def _hoist_root_combinators(schema):
+    """Move a top-level combinator into the description so every client accepts it.
+
+    A root ``anyOf``/``oneOf``/``allOf`` makes Anthropic refuse the whole tool
+    declaration, and because the failure happens while the request is being
+    built, every Claude-backed conversation stops replying.  The requirement the
+    combinator expressed is restated in the description, which is prompt
+    material for the model, and the business layer still enforces the exact
+    rule.  Nested combinators are untouched.
+    """
+    present = [key for key in _ROOT_COMBINATORS
+               if isinstance(schema.get(key), list) and schema[key]]
+    if not present:
+        return schema
+    result = {key: value for key, value in schema.items() if key not in _ROOT_COMBINATORS}
+    groups = []
+    for key in present:
+        branches = []
+        for branch in schema[key]:
+            if isinstance(branch, dict) and set(branch) == {"required"} and isinstance(branch["required"], list):
+                branches.append("同时提供 " + "、".join(str(name) for name in branch["required"]))
+            elif isinstance(branch, dict) and isinstance(branch.get("type"), str):
+                branches.append(f"一段 {branch['type']} 组合约束")
+            else:
+                branches.append("一段组合约束")
+        groups.append(branches)
+    joiner = "；或 " if any(key != "allOf" for key in present) else "；且 "
+    notes = [joiner.join(branch for branch in branches if branch) for branches in groups]
+    note = "二选一用法：" + " ".join(notes) if len(present) == 1 else "组合要求：" + "；".join(notes)
+    description = result.get("description")
+    base = description.rstrip() if isinstance(description, str) else ""
+    result["description"] = (base + ("" if base.endswith(("。", ".")) else "。") + note) if base else note
+    result.setdefault("type", "object")
+    return result
+
 
 
 def _portable_enum(schema):

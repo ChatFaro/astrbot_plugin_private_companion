@@ -171,7 +171,8 @@ window.CompanionSetup = (() => {
       setup_progress_unavailable: "读取设置进度失败（已保留上次结果）；点「重新读取」再试一次，仍失败请查看 AstrBot 日志。",
       setup_model_invalid: "请选择当前已加载的文本模型后再试。",
       setup_model_apply_failed: "模型已通过校验，但保存或初始化没有完成。请查看 AstrBot 日志并重新读取状态。",
-      model_route_unavailable: "当前小屋角色没有可编辑的模型路由，请切换到已关联私聊的人格。",
+      model_route_pending: "还没有关联人格，所以当前角色暂时没有模型路由；完成第 3 步「人格与世界知识」后即可读取。",
+      model_route_unavailable: "已关联的角色没有可读取的模型路由：到「账号与会话」重新保存角色映射后再读取。",
       model_route_scope_changed: "小屋角色已经切换，请重新读取当前角色的模型路由后再保存。",
       legacy_plan_stale: "配置在执行前已更新；重新执行会先重新试算再写入。",
       upgrade_mapping_unavailable: "旧版账号、人格或模型尚未就绪，请核对账号与会话。",
@@ -456,8 +457,10 @@ window.CompanionSetup = (() => {
       ? `<p class="setup-inline-loading" role="status">正在读取后台模型路由…</p>`
       : modelTasksStatus === "error"
         ? `<div class="setup-inline-error" role="alert"><span>${escape(modelTasksError || "后台模型路由暂时无法读取。")}</span>${button("retry-model-routes", "重新读取")}</div>`
-        : modelTasks ? taskMarkup || `<p class="setup-inline-empty">当前没有这些后台任务的模型路由。</p>`
-          : `<p class="setup-inline-loading" role="status">正在读取后台模型路由…</p>`;
+        : modelTasksStatus === "unavailable"
+          ? `<p class="setup-inline-empty" role="status">关联人格后，这里会列出可覆盖的后台任务。</p>`
+          : modelTasks ? taskMarkup || `<p class="setup-inline-empty">当前没有这些后台任务的模型路由。</p>`
+            : `<p class="setup-inline-loading" role="status">正在读取后台模型路由…</p>`;
     return `<div class="setup-quick-models"><p class="setup-quick-models-note">陪伴模型用于插件内部任务；日常对话回复仍跟随 AstrBot 当前人格与主链。</p>
       ${providerMarkup}
       <section class="setup-model-routes"><header><div><h4>常用后台任务</h4><p>主动联系、日程、状态与每日反思</p></div><span>${tasks.length} 项</span></header>${routesMarkup}</section>
@@ -511,7 +514,14 @@ window.CompanionSetup = (() => {
 
   function currentRoleModelRoute() {
     const productApi = product();
-    const endpoint = productApi?.role?.()?.model_api;
+    const current = productApi?.role?.();
+    if (!current) {
+      /* 第 2 步排在第 3 步（关联人格）之前，此时还没有角色，任务路由必然读不到。
+         用独立 code 把这条「顺序上的正常空态」和真正的路由缺失分开，
+         否则引导第一步就会弹一条用户无法处理的红字。 */
+      throw Object.assign(new Error("model_route_pending"), {code: "model_route_pending"});
+    }
+    const endpoint = current.model_api;
     if (typeof endpoint !== "string" || !endpoint) {
       throw Object.assign(new Error("model_route_unavailable"), {code: "model_route_unavailable"});
     }
@@ -539,7 +549,9 @@ window.CompanionSetup = (() => {
       syncModelTasksScope(route.scope);
     } catch (error) {
       syncModelTasksScope();
-      modelTasksStatus = "error";
+      /* 还没有角色是引导顺序造成的空态，不是故障：只在高级设置里显示一句中性说明，
+         不进入顶部 notice，也不显示「重新读取」的错误卡片。 */
+      modelTasksStatus = error?.code === "model_route_pending" ? "unavailable" : "error";
       modelTasksError = errorText(error, "后台模型路由暂时无法读取。");
       return null;
     }
@@ -597,6 +609,8 @@ window.CompanionSetup = (() => {
     try {
       await readModelTasks({force: true});
       if (modelTasksStatus === "error") return modelTasksError;
+      /* 角色还没建立时不要把「尚未可用」升级成页面顶部告警。 */
+      if (modelTasksStatus === "unavailable") return "";
     } catch (error) {
       modelTasks = null;
       modelTasksStatus = "error";
@@ -2996,7 +3010,9 @@ window.CompanionSetup = (() => {
       ${state?.prepared ? `<details class="setup-model-advanced">
         <summary>任务模型路由 · 高级设置（${tasks.length} 项，可稍后再改）</summary>
         <p class="setup-question-note">不打开也可以正常使用。只有当你希望主动联系、日程或记忆使用不同模型时，才需要在这里逐项覆盖。</p>
-        ${taskMarkup || `<p class="setup-inline-error">${modelTasks ? "当前没有已注册的任务路由。" : "任务路由尚未读取，请刷新后重试。"}</p>`}
+        ${taskMarkup || (modelTasksStatus === "unavailable"
+          ? `<p class="setup-inline-empty" role="status">完成第 3 步「人格与世界知识」关联人格后，可在这里逐项覆盖后台任务模型。</p>`
+          : `<p class="setup-inline-error">${modelTasks ? "当前没有已注册的任务路由。" : "任务路由尚未读取，请刷新后重试。"}</p>`)}
       </details>` : ""}
     </section>`;
   }
@@ -3018,7 +3034,7 @@ window.CompanionSetup = (() => {
     model_task_unregistered: "当前角色尚未配置主动联系模型任务。",
     model_provider_unavailable: "主动联系模型不可用，请检查模型路由。",
     model_budget_exhausted: "主动消息模型的每日额度已用完。",
-    contact_diagnostic_source_required: "当前没有可核验的测试契机。",
+    contact_diagnostic_source_required: "还没有可用于测试的私聊记录，一次性合成测试事件也不可用。请先在私聊里发一条消息、等这次回复完成，再点「重新运行主动联系」。",
     setup_test_interrupted: "上次测试已中断，投递结果仍需核对。",
     setup_contact_timeout: "本次等待已结束，投递结果仍需核对。",
     delivery_result_unknown: "平台尚未返回确定的投递回执。",

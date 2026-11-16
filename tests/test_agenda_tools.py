@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import replace
 from datetime import timedelta
@@ -255,9 +255,16 @@ class AgendaToolSchemaTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["message"]["type"], "string")
         self.assertFalse(schema["additionalProperties"])
         # 直接给时间，或关联已有便签；两种合法用法都不能被 required 拦死。
-        self.assertEqual(len(schema["anyOf"]), 2)
-        self.assertEqual(set(schema["anyOf"][0]["required"]), {"schedule", "message"})
-        self.assertEqual(set(schema["anyOf"][1]["required"]), {"memo_id", "expected_memo_revision"})
+        # 二选一必须由 description 承载：顶层 anyOf/oneOf/allOf 会让 Anthropic
+        # 拒绝整轮工具的 input_schema，所有 Claude 会话会整体失声（issue #708）。
+        self.assertLessEqual(set(schema), {"type", "properties", "required",
+                                           "additionalProperties", "description", "title"})
+        for keyword in ("anyOf", "oneOf", "allOf"):
+            self.assertNotIn(keyword, schema)
+        self.assertIn("schedule", schema["description"])
+        self.assertIn("memo_id", schema["description"])
+        # 两种用法都仍然可选，不会被 required 单方面拦死。
+        self.assertEqual(schema["required"], [])
 
     def test_schedule_fold_stays_a_bounded_integer_instead_of_an_enum(self):
         from companion_v2.conversation.tool_loop import specification

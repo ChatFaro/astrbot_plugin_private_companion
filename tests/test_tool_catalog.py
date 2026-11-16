@@ -71,9 +71,13 @@ class ToolCatalogTests(MessageFixture):
         schedule = schema["properties"]["schedule"]
         self.assertEqual(schedule["type"], "object")
         self.assertEqual(schedule["required"], ["anchor", "timezone_name"])
-        self.assertEqual(schedule["properties"]["anchor"]["format"], "date-time")
-        self.assertIn({"required": ["schedule", "message"]}, schema["anyOf"])
-        self.assertEqual(schema["properties"]["message"]["minLength"], 1)
+        self.assertIn("ISO-8601", schedule["properties"]["anchor"]["description"])
+        self.assertEqual(schedule["properties"]["timezone_name"]["type"], "string")
+        self.assertEqual(schema["properties"]["message"]["type"], "string")
+        # 顶层组合子会让 Anthropic 拒绝整轮 input_schema，二选一改由说明承载。
+        for keyword in ("anyOf", "oneOf", "allOf"):
+            self.assertNotIn(keyword, schema)
+        self.assertIn("memo_id", schema["description"])
 
     def test_agenda_catalog_rechecks_current_feature_authority(self):
         registry, _ = self.tool_registry()

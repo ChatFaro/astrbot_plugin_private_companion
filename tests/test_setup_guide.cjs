@@ -2416,3 +2416,82 @@ test('a persona preview cannot attach its plan to an edited destination', async 
   assert.doesNotMatch(page.html, /data-setup-legacy-batch-option="expressions"/);
   assert.doesNotMatch(page.html, /data-setup-legacy-action="legacy-data-batch-apply"/);
 });
+
+/* 八步分别挂载一次：每一步都必须渲染出自己的内容、至少有一个可执行操作，
+   并且在需要工作台的步骤上真的把工作台挂起来。这组断言盯的是「某一步变成空白
+   页 / 工作台不可用 / 进度头停在第一步」这类整页级故障。 */
+const GUIDED_STEPS = [
+  {step: 'binding', mounts: false, status: {step: 'binding', ready: false, prepared: false,
+    mode: {accounts: 'single', personas: 'single'}, binding_confirmed: false,
+    binding: {pending: true, platform_id: 'qq-main', account_id: '100', participant_id: '200',
+      persona_id: 'original'}}},
+  {step: 'model', mounts: false, status: {step: 'model', ready: false, prepared: false,
+    mode: {accounts: 'single', personas: 'single'},
+    model: {provider_id: '', providers: [{id: 'native-model', name: 'Fixture model'}]}}},
+  {step: 'knowledge', mounts: false, completed: ['model'],
+    responses: {'GET setup/profile': {role_profile: {edit_token: 'a'.repeat(64), settings: {}},
+      relationship_profile: {edit_token: 'b'.repeat(64), settings: {}}}}},
+  {step: 'relationships', mounts: false, completed: ['model', 'knowledge'],
+    responses: {'GET setup/profile': {role_profile: {edit_token: 'a'.repeat(64), settings: {}},
+      relationship_profile: {edit_token: 'b'.repeat(64), settings: {}}}}},
+  {step: 'proactive', mounts: true, completed: ['model', 'knowledge', 'relationships']},
+  {step: 'life', mounts: true, completed: ['model', 'knowledge', 'relationships', 'proactive']},
+  {step: 'group', mounts: true, completed: ['model', 'knowledge', 'relationships', 'proactive', 'life']},
+  {step: 'proactive_test', mounts: false, completed: ['model', 'knowledge', 'relationships',
+    'proactive', 'life', 'group']},
+];
+
+test('every guided step renders its own content and a working action', async () => {
+  for (const [index, entry] of GUIDED_STEPS.entries()) {
+    const status = {ready: false, prepared: true, mode: {accounts: 'single', personas: 'single'},
+      model: {provider_id: 'native-model', providers: [{id: 'native-model', name: 'Fixture model'}]},
+      skipped: [], proactive_test: null, ...entry.status,
+      step: entry.step, completed: entry.completed || ['model']};
+    const page = harness({status, responses: entry.responses || {}});
+    page.mount();
+    await settle();
+
+    assert.match(page.html, /setup-shell/, `${entry.step}: 没有渲染出引导外壳`);
+    assert.match(page.html, new RegExp(`第 ${index + 1} 步`),
+      `${entry.step}: 进度头没有停在第 ${index + 1} 步`);
+    assert.match(page.html, /data-setup-action=/, `${entry.step}: 这一步没有任何可执行操作`);
+    assert.doesNotMatch(page.html, /setup-inline-unavailable/, `${entry.step}: 设置工作台不可用`);
+    if (entry.mounts) {
+      assert.ok(page.editorCalls.length > 0, `${entry.step}: 设置工作台没有被挂载`);
+    }
+    page.unmount();
+  }
+});
+
+test('the completed guide counts the blocks it actually renders', async () => {
+  /* 完成页的说明文案写死了「6 组常用设置」，而 ADVANCED_BLOCKS 已经是 7 组。
+     断言文案与真实条目数一致，这样以后增删分组不会再让这句话变成错的。 */
+  const page = harness({status: readyStatus()});
+  page.mount();
+  await settle();
+
+  assert.match(page.html, /开始使用 · 常用设置导览/);
+  const rendered = (page.html.match(/class="setup-guide-item"/g) || []).length;
+  assert.ok(rendered > 0, '完成页没有渲染任何设置分组');
+  assert.match(page.html, new RegExp(`${rendered} 组常用设置`),
+    `文案里的组数必须等于真正渲染的 ${rendered} 组`);
+});
+
+test('an unknown step reports itself instead of blanking the guide', async () => {
+  /* renderSection() 只认识 knowledge / relationships。任何别的 step 值以前会在这里
+     抛 TypeError；refresh() 的 catch 又把渲染异常当成「接口没连通」，于是用户看到
+     「暂时读不到设置进度 / Cannot read properties of undefined」。 */
+  const page = harness({status: {step: 'unexpected_step', ready: false, prepared: true,
+    binding_confirmed: true, completed: ['model'], skipped: []}});
+  page.mount();
+  await settle();
+
+  assert.match(page.html, /setup-shell/);
+  assert.match(page.html, /没有对应的设置面板/);
+  assert.match(page.html, /unexpected_step/);
+  assert.match(page.html, /data-setup-action="refresh"/);
+  // 内部报错绝不能出现在界面上，也不能被误诊成连接故障。
+  assert.doesNotMatch(page.html, /Cannot read properties|is not a function|undefined \(reading/);
+  assert.doesNotMatch(page.html, /暂时读不到设置进度/);
+});
+

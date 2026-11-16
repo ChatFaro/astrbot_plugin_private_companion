@@ -2929,11 +2929,23 @@ window.CompanionSetup = (() => {
     </section>`;
   }
 
+  /* 后端只可能给出 ORDER 里的步骤，但页面拿到的 status 未必与当前页面同版本：
+     旧页面配新插件、反过来、或某个步骤被改名时，这里必须给出可执行的说明，
+     而不是抛 TypeError 让整页走进「接口没连通」的兜底。 */
+  function renderStepUnavailable(step) {
+    return `<section class="setup-stage">
+      <p class="setup-kicker">步骤状态</p><h3>这一步在当前页面里没有对应的设置面板</h3>
+      <p>页面上没有关于「${escape(step || "未知步骤")}」这一步的渲染逻辑，通常是页面与插件版本不一致。请先点「重新读取」；仍然如此请重载插件后再打开本页。</p>
+      <div class="setup-actions">${button("refresh", "重新读取", {primary: true})}${homeButton("进入陪伴小屋")}</div>
+    </section>`;
+  }
+
   function renderSection(step) {
     const definitions = {
       knowledge: {number: "第 3 步 · 可选", title: "从人格整理角色设定", target: "role_profile", canSkip: true},
       relationships: {number: "第 4 步 · 可选", title: "整理熟人卡", target: "relationship_profile", canSkip: true},
     }[step];
+    if (!definitions) return renderStepUnavailable(step);
     const complete = state?.completed?.includes(step);
     const skipped = state?.skipped?.includes(step);
     const target = definitions.target;
@@ -3208,7 +3220,7 @@ window.CompanionSetup = (() => {
     </li>`).join("");
     return `<div class="setup-shell setup-complete-shell setup-guide-shell">
       <header class="setup-header"><div class="setup-header-copy"><span class="setup-kicker">我会永远陪着你</span><h2>开始使用 · 常用设置导览</h2>
-        <p class="setup-header-sub">首次连接与主动测试已完成。下面按使用频率整理了 6 组常用设置，点「展开设置」即可就地修改，不必在多个页面来回寻找。</p></div>
+        <p class="setup-header-sub">首次连接与主动测试已完成。下面按使用频率整理了 ${ADVANCED_BLOCKS.length} 组常用设置，点「展开设置」即可就地修改，不必在多个页面来回寻找。</p></div>
         <div class="setup-header-actions"><button type="button" class="button" data-setup-action="advanced-open">快速配置</button>${homeButton("进入陪伴小屋")}</div></header>
       ${upgradeCard()}
       <p class="setup-guide-status" role="status">首次设置已完成 · 之后随时可以回来调整这些设置。</p>
@@ -3304,6 +3316,7 @@ window.CompanionSetup = (() => {
 
   async function refresh() {
     const ticket = ++generation;
+    let loaded = false;
     try {
       const result = await api("GET", "/status");
       if (ticket !== generation) return;
@@ -3313,22 +3326,39 @@ window.CompanionSetup = (() => {
       notice = "";
       modelDraft = result?.model?.provider_id || "";
       await loadStepData(result);
-      render();
-      /* 旧版探测只补充升级卡，不应延迟当前版本首屏。 */
-      const discoveryAddress = !migrationOnly && !legacyFinding ? legacyAddress() : "";
-      if (discoveryAddress) {
-        void migrationRequest("GET", discoveryAddress, legacyQuery()).then(found => {
-          if (ticket !== generation || !root || migrationOnly || !found || found.status) return;
-          legacyFinding = found;
-          render();
-        }).catch(() => {});
-      }
+      loaded = true;
       if (result?.proactive_test?.state === "started") void watchProactive();
     } catch (error) {
       if (ticket !== generation) return;
       state = null;
       notice = errorText(error, "当前版本管理接口暂时没有连通。");
+    }
+    if (ticket !== generation) return;
+    /* render() 抛异常时不能沿用上面的结论：那会把页面自身的缺陷报成「接口没连通」，
+       还会把 Cannot read properties… 这类内部报错原样显示给用户。这里单独处理，
+       把细节留在控制台，界面只给可执行的下一步。 */
+    try {
       render();
+    } catch (error) {
+      console.error("[CompanionSetup] 渲染失败", error);
+      state = null;
+      notice = "设置页面渲染失败，请点「重新读取」；仍然失败请重载插件后再打开本页。";
+      try {
+        render();
+      } catch {
+        /* 最后一道兜底也不能再抛，否则这次刷新就彻底没有结果 */
+      }
+      return;
+    }
+    if (!loaded) return;
+    /* 旧版探测只补充升级卡，不应延迟当前版本首屏。 */
+    const discoveryAddress = !migrationOnly && !legacyFinding ? legacyAddress() : "";
+    if (discoveryAddress) {
+      void migrationRequest("GET", discoveryAddress, legacyQuery()).then(found => {
+        if (ticket !== generation || !root || migrationOnly || !found || found.status) return;
+        legacyFinding = found;
+        try { render(); } catch (error) { console.error("[CompanionSetup] 升级卡渲染失败", error); }
+      }).catch(() => {});
     }
   }
 

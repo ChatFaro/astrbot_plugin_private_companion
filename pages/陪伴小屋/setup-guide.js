@@ -85,6 +85,14 @@ window.CompanionSetup = (() => {
       note: "被叫到时怎么接、平时是否观察、要不要主动插话。"}}},
   };
   let stepEditor = null;
+  /* 与 config-editor.js 的 endpointFor 保持一致：这些分区是安装级，不需要角色。 */
+  const INSTALLATION_CONFIG_KINDS = new Set(["proactive.contact", "reaction", "budget",
+    "private_access_installation"]);
+
+  function stepNeedsRoleEndpoint(step) {
+    const block = STEP_EDITORS[step];
+    return Boolean(block) && !block.kinds.every(kind => INSTALLATION_CONFIG_KINDS.has(kind));
+  }
   function stopStepEditor() {
     stepEditor?.stop?.();
     stepEditor = null;
@@ -3342,9 +3350,10 @@ window.CompanionSetup = (() => {
     /* 角色级设置工作台（第 6、7 步与「快速配置」里的分区）要靠 product().role()
        拿到 config_api；而产品目录是页面打开时读的，早于核心窗口绑定。全新安装下
        它一直为空，于是这些工作台永远显示「暂不可用」，重试也没用。
-       绑定已确认、却仍读不到角色时，重读一次目录（3 秒内不重复），让渲染拿到角色。 */
-    if (result?.prepared && result?.binding_confirmed && !product()?.role?.()
-        && Date.now() - directoryAttemptAt > DIRECTORY_RETRY_MS) {
+       只在**当前步骤确实需要角色**时重读（绑定已确认、3 秒内不重复）：重读目录会让
+       小屋外壳跟着重绘，在不相关的步骤上做这件事，看起来就像「保存后页面自己刷新」。 */
+    if (result?.prepared && result?.binding_confirmed && stepNeedsRoleEndpoint(result?.step)
+        && !product()?.role?.() && Date.now() - directoryAttemptAt > DIRECTORY_RETRY_MS) {
       directoryAttemptAt = Date.now();
       await refreshDirectoryQuietly();
     }

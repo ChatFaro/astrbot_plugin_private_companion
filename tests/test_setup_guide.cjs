@@ -2522,6 +2522,19 @@ test('a fenced save offers the one action that can actually recover it', async (
   assert.doesNotMatch(page.html, /宿主刚刚重启或重载/);
 });
 
+test('saving the model step does not reload the product directory', async () => {
+  /* 重读产品目录会让小屋外壳跟着重绘，用户看到的就是「点保存后页面自己刷新了一次」。
+     第 2 步的工作台是安装级的，不需要角色，所以这条路径绝不能触发目录重读。 */
+  const status = {step: 'model', ready: false, prepared: true, binding_confirmed: true,
+    completed: [], skipped: [], mode: {accounts: 'single', personas: 'single'},
+    model: {provider_id: '', providers: [{id: 'native-model', name: 'Fixture model'}]}};
+  const page = harness({status, configEditorsAvailable: true, roleMissingUntilRefresh: true});
+  page.mount();
+  await settle();
+
+  assert.equal(page.directoryRefreshes, 0, '第 2 步不应该重读产品目录');
+});
+
 test('a role that only appears after the directory reload still mounts its editor', async () => {
   /* 产品目录在页面打开时加载，早于第 1 步的窗口绑定。全新安装下目录里没有角色，
      而第 6、7 步的工作台要靠 product().role() 拿 config_api，于是它们永远显示

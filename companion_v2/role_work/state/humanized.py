@@ -209,6 +209,13 @@ def parse_patrol_time(value):
         raise ConfigurationError("role_state_humanized", "the patrol time must look like 04:00") from error
     if parsed.tzinfo is not None or parsed.second or parsed.microsecond or len(text) != 5:
         raise ConfigurationError("role_state_humanized", "the patrol time must be a local HH:MM value")
+    # ``time.fromisoformat`` accepts "24:00" as an ISO end-of-day rollover and
+    # answers 00:00. A patrol time is a clock reading, not the end of a duration,
+    # so an operator who typed 24:00 must be told: silently reviewing at midnight
+    # is the worst of both readings. ("24:00:00" already fails the length check.)
+    if int(text[:2]) > 23:
+        raise ConfigurationError("role_state_humanized",
+                                 "the patrol time must be a local HH:MM value between 00:00 and 23:59")
     return parsed
 
 

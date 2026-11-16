@@ -209,6 +209,8 @@ def environment(root: Path, repo: Path) -> dict[str, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="store_true", help="run pytest after stubbing")
+    parser.add_argument("--emit", action="store_true",
+                        help="write the stub and print its root, without running anything")
     parser.add_argument("--keep", action="store_true",
                         help="reuse a stub root from SANDBOX_SDK_ROOT instead of a fresh one")
     parser.add_argument("--list-excluded", action="store_true")
@@ -224,6 +226,12 @@ def main() -> int:
     root = Path(os.environ.get("SANDBOX_SDK_ROOT") or mkdtemp(prefix="astrbot-sdk-stub-"))
     build(root)
     print(f"stub root {root}")
+
+    if options.emit:
+        # Documented in the module docstring and used to export the stub root for
+        # a non-pytest runner (this repo's suites are unittest); it used to be
+        # advertised but never declared, so the documented invocation failed.
+        return 0
 
     if not options.run:
         return 0

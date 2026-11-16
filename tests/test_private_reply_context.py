@@ -78,6 +78,29 @@ class PrivateReplyContextTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["text"] for item in merged["current_inputs"]], ["看看", "当然"])
         self.assertEqual(merged["input_received_at"], stamp(second["native_input"].at))
 
+    async def test_one_segmented_reply_occupies_one_window_turn(self):
+        """Segmentation must not spend the reply window on a single reply.
+
+        Every platform bubble is its own native observation, so a row-counted
+        window turned one segmented reply into several "recent turns": two or
+        three replies filled the whole window with the same paragraph, the model
+        read that as what it had recently said, and the material reinforced its
+        own repetition (issue #611).  Bubbles of one turn belong together.
+        """
+        _, first = await self.prepare("讲个长故事", "segment-first")
+        self.clock.advance(timedelta(seconds=3))
+        for bubble in ("第一段内容。", "第二段内容。", "第三段内容。"):
+            await self.sent(first, bubble)
+            self.clock.advance(timedelta(seconds=3))
+        _, current = await self.prepare("继续", "segment-current")
+
+        material = self.capture(current)
+        replies = [item for item in material["before_input"] if item["speaker"] == "assistant"]
+        self.assertEqual(len(replies), 1, replies)
+        self.assertEqual(replies[0]["turn_id"], first["turn_id"])
+        # Every bubble survives, in the order it was actually sent.
+        self.assertEqual(replies[0]["text"], "第一段内容。\n第二段内容。\n第三段内容。")
+
     async def test_drafts_stay_out_and_provider_context_is_temporary_and_refreshed(self):
         _, first = await self.prepare("来张自拍看看", "draft-first")
         self.clock.advance(timedelta(seconds=5))

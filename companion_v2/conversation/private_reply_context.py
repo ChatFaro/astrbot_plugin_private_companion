@@ -70,9 +70,9 @@ def capture_private_reply_context(messages, context, native_input, *, at, merged
         else:
             received = _moment(inputs[0]["received_at"])
     earlier = dialogue(messages, context, now, end=stamp(received), limit=24, max_chars=3600,
-                       include_turns=True)
+                       include_turns=True, collapse_turns=True)
     later = dialogue(messages, context, now, start=stamp(received), end=stamp(now),
-                     limit=12, max_chars=1800, include_turns=True)
+                     limit=12, max_chars=1800, include_turns=True, collapse_turns=True)
 
     def project(items, *, after_input=False):
         result = []

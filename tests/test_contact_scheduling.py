@@ -3,7 +3,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from companion_v2.conversation.foreground import BackgroundPromptTrigger
 from companion_v2.conversation.flow import ConversationPolicy
@@ -60,6 +60,54 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
                 app.contact_schedule.validate_diagnostic_origin(
                     context, candidate["diagnostic_origin"], at, purpose="chat",
                     role_instruction="changed persona")
+
+    async def test_diagnostic_without_history_falls_back_to_a_synthetic_scenario(self):
+        """The onboarding test must work before the administrator has chatted.
+
+        Without a completed private turn the source-backed producer can only
+        answer ``contact_diagnostic_source_required``; step 8 of the guide used
+        to dead-end there with a technical code.  The fallback has to keep the
+        real persona anchor and stay a valid diagnostic origin.
+        """
+        host, _batch_id = await self.scheduled(automatic=False)
+        app = host.application
+        context = self.contact_context()
+        at = self.clock.now()
+
+        with patch.object(app.contact_schedule, "latest_conversation", return_value=None):
+            candidate, source_backed = await app.contact_schedule.diagnostic_candidate_with_fallback(
+                context, "chat", at=at, test_id="attempt-no-history",
+                role_instruction="当前角色人格提示", settle_attempts=1)
+            self.assertEqual(candidate["diagnostic_origin"]["_diagnostic"]["source_mode"], "no_conversation")
+            app.contact_schedule.validate_diagnostic_origin(
+                context, candidate["diagnostic_origin"], at, purpose="chat",
+                role_instruction="当前角色人格提示")
+
+        self.assertFalse(source_backed)
+        self.assertEqual(candidate["route"]["id"], "synthetic_event")
+        self.assertEqual(candidate["role_instruction"], "当前角色人格提示")
+
+    async def test_a_turn_that_never_settles_is_not_masked_by_the_fallback(self):
+        """A live conversation that keeps changing is a real failure, not a test gap.
+
+        Only ``contact_diagnostic_source_required`` may fall back; anything else
+        must reach the operator as itself, or a genuinely broken turn would be
+        hidden behind a synthetic scenario and look like a passing test.
+        """
+        host, _batch_id = await self.scheduled(automatic=False)
+        app = host.application
+        context = self.contact_context()
+        at = self.clock.now()
+
+        with patch.object(app.contact_schedule, "diagnostic_candidate",
+                          AsyncMock(side_effect=TaskError("contact_conversation_changed",
+                                                          "the current turn keeps changing"))):
+            with self.assertRaises(TaskError) as caught:
+                await app.contact_schedule.diagnostic_candidate_with_fallback(
+                    context, "chat", at=at, test_id="attempt-race",
+                    settle_attempts=2, settle_seconds=0)
+
+        self.assertEqual(caught.exception.code, "contact_conversation_changed")
 
     async def test_legacy_group_flows_are_not_considered_for_private_contact(self):
         host, batch_id = await self.scheduled()

@@ -9,6 +9,11 @@ from .native_observations import REALITY_ASSISTANT_OWNER, TOGETHER_OWNERS, obser
 from .reset import source_current
 
 
+# How many platform bubbles one segmented reply may occupy.  Only used to widen
+# the SQL row budget before turning bubbles into turns; see ``dialogue``.
+MAX_TURN_BUBBLES = 8
+
+
 def reference(row):
     return {"kind": "native_input" if row["kind"] == "input" else "native_reply",
             "observation_id": row["observation_id"], "content_hash": row["content_hash"],
@@ -87,22 +92,34 @@ def body(messages, ref, context, at, *, historical=False):
 
 
 def dialogue(messages, context, at, *, start=None, end=None, limit=32, max_chars=8000,
-             include_turns=False):
+             include_turns=False, collapse_turns=False):
     """Read a bounded, validated private native dialogue in chronological order.
 
     Only input observations and actual assistant send returns are exposed.  The
     returned rows intentionally contain no mutable source object so callers can
     safely place the material in an asynchronous model request.
+
+    ``collapse_turns`` merges one native send round's bubbles into a single entry
+    *before* the entry budget is applied.  Segmentation splits one reply into
+    several platform messages, and every bubble is its own observation, so a
+    row-counted window spends its whole budget on two or three replies: the model
+    then reads "what I recently said" as the same paragraph repeated, keeps
+    producing it, and the material reinforces itself.  A window that is meant to
+    describe recent *turns* must count turns.
     """
     if max_chars <= 0:
         return ()
+    if collapse_turns:
+        include_turns = True
+    budget = max(1, limit)
+    fetch = budget * MAX_TURN_BUBBLES if collapse_turns else budget
     result = []
     remaining = max_chars
     # Apply the text budget from the latest messages backwards. Reading in
     # chronological order first could spend the whole budget on older inputs
     # and silently omit the assistant's latest care/recovery feedback.
-    for row in rows(messages.runtime, context, start=start, end=end, limit=limit):
-        if remaining <= 0:
+    for row in rows(messages.runtime, context, start=start, end=end, limit=fetch):
+        if remaining <= 0 or (collapse_turns and len(result) >= budget):
             break
         try:
             item = body(messages, reference(row), context, at)
@@ -123,6 +140,15 @@ def dialogue(messages, context, at, *, start=None, end=None, limit=32, max_chars
         }
         if include_turns:
             entry.update(turn_id=row["turn_id"], event_id=row["event_id"])
+        # Rows arrive newest first, so the entry already collected for this turn
+        # is the one that was *sent later*: put the older bubble in front of it.
+        previous = result[-1] if result else None
+        if (collapse_turns and previous is not None
+                and previous["speaker"] == "assistant" and entry["speaker"] == "assistant"
+                and previous["turn_id"] and previous["turn_id"] == entry["turn_id"]):
+            previous["text"] = (text + "\n" + previous["text"])[:1600]
+            previous["at"] = entry["at"]
+            continue
         result.append(entry)
         remaining -= len(text)
     return tuple(reversed(result))

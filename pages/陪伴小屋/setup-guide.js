@@ -89,6 +89,15 @@ window.CompanionSetup = (() => {
     stepEditor?.stop?.();
     stepEditor = null;
   }
+  /* 同一个兜底文案原先对两种情况都说「请重新读取」，而其中一种重试永远无效：
+     页面还没有任何角色目标时，角色级工作台拿不到 config_api。 */
+  function workspaceUnavailableMarkup() {
+    const reason = product()?.role?.()
+      ? "当前角色的设置工作台暂不可用，请重新读取后再试。"
+      : "还没有可用的角色目标，所以这里打不开设置工作台。请先完成第 1 步的窗口绑定，并在「账号与会话」保存角色映射后再回来。";
+    return `<p class="setup-inline-unavailable">${escape(reason)}</p>`;
+  }
+
   function mountStepEditor(step) {
     const block = STEP_EDITORS[step];
     const host = root?.querySelector("#setupStepEditor");
@@ -99,7 +108,7 @@ window.CompanionSetup = (() => {
       stepEditor.paint?.();
       void stepEditor.read?.();
     } else {
-      host.innerHTML = `<p class="setup-inline-unavailable">当前角色的设置工作台暂不可用，请重新读取后再试。</p>`;
+      host.innerHTML = workspaceUnavailableMarkup();
     }
   }
   function nextStepPreview(step) {
@@ -221,6 +230,10 @@ window.CompanionSetup = (() => {
   let legacyDataRequestId = 0;
   let legacyDataRefreshing = false;
   let notice = "";
+  /* 上一次重读产品目录的时间，用于在「绑定已确认但目录还没有角色」时自愈，
+     同时避免每次刷新都打一次目录请求。 */
+  let directoryAttemptAt = 0;
+  const DIRECTORY_RETRY_MS = 3000;
   /* 上一次动作失败的机器码。界面靠它决定要不要给「重新连接」这类恢复入口，
      而 notice 里只有给人看的句子。 */
   let noticeCode = "";
@@ -504,7 +517,7 @@ window.CompanionSetup = (() => {
         void quickEditor.read?.();
       } else {
         const editorHost = host("#setupAdvancedEditorHost");
-        if (editorHost) editorHost.innerHTML = `<p class="setup-inline-unavailable">当前角色的设置工作台暂不可用，请重新读取后再试。</p>`;
+        if (editorHost) editorHost.innerHTML = workspaceUnavailableMarkup();
       }
     }
     if (block.mount === "model" && state?.prepared && modelTasksStatus === "idle") void loadQuickModels();
@@ -3326,6 +3339,15 @@ window.CompanionSetup = (() => {
       try { profileState = await api("GET", "/profile"); }
       catch (error) { profileState = null; loadError = errorText(error, "角色档案暂时无法读取。"); }
     } else if (!["knowledge", "relationships"].includes(result?.step)) profileState = null;
+    /* 角色级设置工作台（第 6、7 步与「快速配置」里的分区）要靠 product().role()
+       拿到 config_api；而产品目录是页面打开时读的，早于核心窗口绑定。全新安装下
+       它一直为空，于是这些工作台永远显示「暂不可用」，重试也没用。
+       绑定已确认、却仍读不到角色时，重读一次目录（3 秒内不重复），让渲染拿到角色。 */
+    if (result?.prepared && result?.binding_confirmed && !product()?.role?.()
+        && Date.now() - directoryAttemptAt > DIRECTORY_RETRY_MS) {
+      directoryAttemptAt = Date.now();
+      await refreshDirectoryQuietly();
+    }
     if (loadError) notice = loadError;
   }
 

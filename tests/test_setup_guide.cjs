@@ -13,7 +13,8 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 const settle = async () => { for (let i = 0; i < 12; i += 1) await flush(); };
 
 function harness({status, responses = {}, targets = [], refreshedTargets = targets, accounts = [], personas = [],
-  bridgeResponses = {}, configEditorsAvailable = true, confirmResult = true, directoryError = null}) {
+  bridgeResponses = {}, configEditorsAvailable = true, confirmResult = true, directoryError = null,
+  roleMissingUntilRefresh = false}) {
   const calls = [];
   const bridgeCalls = [];
   const editorCalls = [];
@@ -28,6 +29,8 @@ function harness({status, responses = {}, targets = [], refreshedTargets = targe
   const sessionValues = new Map();
   let directoryRefreshes = 0;
   let currentTargets = targets;
+  /* 只在需要复现「目录早于绑定加载」的用例里为真：初始没有角色，重读目录后才有。 */
+  let roleMissing = roleMissingUntilRefresh;
   let html = '';
   let currentStatus = status;
   const mountHosts = {
@@ -42,8 +45,7 @@ function harness({status, responses = {}, targets = [], refreshedTargets = targe
     addEventListener: (name, fn) => { listeners[name] = fn; },
     removeEventListener: name => { delete listeners[name]; },
     querySelector: selector => mountHosts[selector] || null,
-  };
-  Object.defineProperty(node, 'innerHTML', {get: () => html, set: value => { html = value; }});
+  };  Object.defineProperty(node, 'innerHTML', {get: () => html, set: value => { html = value; }});
   const product = {
     request(method, route, body, options) {
       calls.push({method, route, body, options});
@@ -64,9 +66,13 @@ function harness({status, responses = {}, targets = [], refreshedTargets = targe
       directoryRefreshes += 1;
       if (directoryError) throw directoryError;
       currentTargets = refreshedTargets;
+      /* 复现「产品目录早于绑定加载、要等重读才有角色」的真实时序。 */
+      roleMissing = false;
     },
-    role: () => configEditorsAvailable ? {reply_api: '/astrbot_plugin_private_companion/reply/current',
-      model_api: '/astrbot_plugin_private_companion/model'} : null,
+    role: () => (configEditorsAvailable && !roleMissing)
+      ? {reply_api: '/astrbot_plugin_private_companion/reply/current',
+         model_api: '/astrbot_plugin_private_companion/model'}
+      : null,
     scopeKey: () => 'installation-a:target-a:role-a',
     unwrap: response => response,
     relative(address) {
@@ -81,7 +87,15 @@ function harness({status, responses = {}, targets = [], refreshedTargets = targe
     const result = bridgeResponses[route];
     return Promise.resolve(typeof result === 'function' ? result(body) : result || {});
   }};
+  /* 比照 config-editor.js 的 endpointFor：安装级分区不需要角色，其余分区必须能拿到
+     config_api（或显式 override），否则 create() 返回 null，调用方才会渲染
+     「设置工作台暂不可用」。没有这条规则时，任何用例都测不到那个兜底分支。 */
+  const INSTALLATION_KINDS = new Set(['proactive.contact', 'reaction', 'budget',
+    'private_access_installation']);
   const configEditors = configEditorsAvailable ? {create(kinds, rootProvider, views, endpoint) {
+    const installationOnly = kinds.length > 0 && kinds.every(kind => INSTALLATION_KINDS.has(kind));
+    const roleEndpoint = product.role()?.config_api || product.role()?.reply_api;
+    if (!installationOnly && !endpoint && !roleEndpoint) return null;
     editorCalls.push({kinds: [...kinds], host: rootProvider(), views, endpoint});
     return {restore() {}, paint() {}, read() {}, stop() { editorStops.push([...kinds]); }};
   }} : null;
@@ -168,6 +182,12 @@ function harness({status, responses = {}, targets = [], refreshedTargets = targe
     updateStatus: value => { currentStatus = value; },
     editorCalls,
     editorStops,
+    /* 工作台兜底文案写进挂载点自己的 innerHTML，不在 page.html 里；必须单独取，
+       否则「工作台不可用」这个分支根本测不到。 */
+    get stepEditorHtml() { return (mountHosts['#setupStepEditor'] && mountHosts['#setupStepEditor'].innerHTML) || ''; },
+    get advancedEditorHtml() {
+      return (mountHosts['#setupAdvancedEditorHost'] && mountHosts['#setupAdvancedEditorHost'].innerHTML) || '';
+    },
     replyMounts,
     stateMounts,
     modelMounts,
@@ -2455,7 +2475,8 @@ test('every guided step renders its own content and a working action', async () 
     assert.match(page.html, new RegExp(`第 ${index + 1} 步`),
       `${entry.step}: 进度头没有停在第 ${index + 1} 步`);
     assert.match(page.html, /data-setup-action=/, `${entry.step}: 这一步没有任何可执行操作`);
-    assert.doesNotMatch(page.html, /setup-inline-unavailable/, `${entry.step}: 设置工作台不可用`);
+    assert.doesNotMatch(page.stepEditorHtml, /setup-inline-unavailable/,
+      `${entry.step}: 设置工作台不可用`);
     if (entry.mounts) {
       assert.ok(page.editorCalls.length > 0, `${entry.step}: 设置工作台没有被挂载`);
     }
@@ -2499,6 +2520,39 @@ test('a fenced save offers the one action that can actually recover it', async (
   assert.match(page.html, /data-setup-action="reconnect-host"/);
   // 恢复入口只在这类失败后出现，正常页面上不该多一个会重启宿主的按钮。
   assert.doesNotMatch(page.html, /宿主刚刚重启或重载/);
+});
+
+test('a role that only appears after the directory reload still mounts its editor', async () => {
+  /* 产品目录在页面打开时加载，早于第 1 步的窗口绑定。全新安装下目录里没有角色，
+     而第 6、7 步的工作台要靠 product().role() 拿 config_api，于是它们永远显示
+     「当前角色的设置工作台暂不可用，请重新读取后再试」——重试也修不好。
+     引导页现在会在「绑定已确认但仍读不到角色」时重读一次目录。 */
+  const status = {step: 'life', ready: false, prepared: true, binding_confirmed: true,
+    completed: ['model', 'knowledge', 'relationships', 'proactive'], skipped: [],
+    mode: {accounts: 'single', personas: 'single'},
+    model: {provider_id: 'native-model', providers: []}};
+  const page = harness({status, configEditorsAvailable: true, roleMissingUntilRefresh: true});
+  page.mount();
+  await settle();
+
+  assert.ok(page.directoryRefreshes > 0, '应当重读过产品目录');
+  assert.ok(page.editorCalls.length > 0, '目录刷新后设置工作台应当挂载');
+  assert.doesNotMatch(page.stepEditorHtml, /setup-inline-unavailable/);
+});
+
+test('without any role the fallback names the actual next step', async () => {
+  /* 重读也不会有角色时（还没绑窗口），文案必须指向可执行的一步，而不是让人反复点
+     「重新读取」。 */
+  const status = {step: 'life', ready: false, prepared: true, binding_confirmed: false,
+    completed: ['model'], skipped: [], mode: {accounts: 'single', personas: 'single'},
+    model: {provider_id: 'native-model', providers: []}};
+  const page = harness({status, configEditorsAvailable: true, roleMissingUntilRefresh: true});
+  page.mount();
+  await settle();
+
+  assert.match(page.stepEditorHtml, /setup-inline-unavailable/);
+  assert.match(page.stepEditorHtml, /还没有可用的角色目标/);
+  assert.doesNotMatch(page.stepEditorHtml, /请重新读取后再试/);
 });
 
 test('an unknown step reports itself instead of blanking the guide', async () => {

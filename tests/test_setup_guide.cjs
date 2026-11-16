@@ -2477,6 +2477,30 @@ test('the completed guide counts the blocks it actually renders', async () => {
     `文案里的组数必须等于真正渲染的 ${rendered} 组`);
 });
 
+test('a fenced save offers the one action that can actually recover it', async () => {
+  /* 「宿主刚刚重启或重载…请再保存一次」在实例根本没启动时永远重试不成。
+     后端现在把它报成 setup_host_not_running，页面必须给出「重新连接」。 */
+  const failure = Object.assign(new Error('fenced'), {code: 'setup_host_not_running'});
+  const status = {step: 'knowledge', prepared: true, ready: false, binding_confirmed: true,
+    completed: ['model'], skipped: [], mode: {accounts: 'single', personas: 'single'},
+    model: {provider_id: 'native-model', providers: []}};
+  const page = harness({status, responses: {
+    'GET setup/profile': {role_profile: {edit_token: 'a'.repeat(64), settings: {}},
+      relationship_profile: {edit_token: 'b'.repeat(64), settings: {}}},
+    'GET setup/status': status,
+    'POST setup/complete': failure,
+  }});
+  page.mount();
+  await settle();
+  page.click('complete-step');
+  await settle();
+
+  assert.match(page.html, /运行实例没有在运行/);
+  assert.match(page.html, /data-setup-action="reconnect-host"/);
+  // 恢复入口只在这类失败后出现，正常页面上不该多一个会重启宿主的按钮。
+  assert.doesNotMatch(page.html, /宿主刚刚重启或重载/);
+});
+
 test('an unknown step reports itself instead of blanking the guide', async () => {
   /* renderSection() 只认识 knowledge / relationships。任何别的 step 值以前会在这里
      抛 TypeError；refresh() 的 catch 又把渲染异常当成「接口没连通」，于是用户看到

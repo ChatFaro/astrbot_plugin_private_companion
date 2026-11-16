@@ -122,8 +122,15 @@ window.CompanionSetup = (() => {
       <div class="setup-actions">
         ${button("complete-step", complete ? "重新确认完成" : skipped ? "改为已完成" : "已完成这部分", {primary: true})}
         ${button("skip-step", "暂时跳过")}
+        ${hostRecoveryMarkup()}
       </div>
     </section>`;
+  }
+
+  /* 保存被运行实例挡住时，唯一有效的下一步是把它重新启动起来。只在确实发生过
+     这类失败时出现，避免在正常页面上多一个会重启宿主的按钮。 */
+  function hostRecoveryMarkup() {
+    return noticeCode === "setup_host_not_running" ? button("reconnect-host", "重新连接", {primary: true}) : "";
   }
   function stageBanner(step) {
     const meta = stepMeta(step);
@@ -166,6 +173,10 @@ window.CompanionSetup = (() => {
       staging_host_terminated: "插件已停止，请重新打开插件页面。",
       supervisor_fenced: "宿主刚刚重启或重载，刚才的保存没有生效；已重新读取档案，请再保存一次。",
       supervisor_generation_conflict: "宿主状态已更新，刚才的保存没有生效；已重新读取档案，请再保存一次。",
+      /* 配置写入被「代次栅栏」挡住时，先确认运行实例到底在不在跑：没在跑时重试
+         永远不会成功，必须先把它启动起来。 */
+      setup_host_not_running: "当前运行实例没有在运行，本次保存没有生效；点下方「重新连接」，等实例运行后再保存一次。",
+      setup_host_start_failed: "运行实例没能启动，本次保存没有生效；请查看 AstrBot 日志后点「重新连接」。",
       bridge_timeout: "连接超时，请重新读取；原操作结果需要核对。",
       invalid_response: "服务返回的数据不完整，请重新读取。",
       setup_progress_unavailable: "读取设置进度失败（已保留上次结果）；点「重新读取」再试一次，仍失败请查看 AstrBot 日志。",
@@ -210,6 +221,9 @@ window.CompanionSetup = (() => {
   let legacyDataRequestId = 0;
   let legacyDataRefreshing = false;
   let notice = "";
+  /* 上一次动作失败的机器码。界面靠它决定要不要给「重新连接」这类恢复入口，
+     而 notice 里只有给人看的句子。 */
+  let noticeCode = "";
   let migrationProgress = "";
   let modelDraft = "";
   let modelTasks = null;
@@ -2975,6 +2989,7 @@ window.CompanionSetup = (() => {
         ${button("generate-profile", draft ? "重新生成人格草稿" : target === "role_profile" ? "从人格生成角色设定" : "从人格生成熟人卡", {primary: !draft, disabled: !current})}
         ${button("complete-step", complete ? "重新确认完成" : skipped ? "改为已完成" : "已完成这部分", {primary: true})}
         ${definitions.canSkip ? button("skip-step", "暂时跳过") : ""}
+        ${hostRecoveryMarkup()}
       </div>
     </section>`;
   }
@@ -3324,6 +3339,7 @@ window.CompanionSetup = (() => {
       /* 成功读到新状态后，上一轮网络失败提示必须消失；子步骤若读失败，
          loadStepData() 会再写入更具体的提示。 */
       notice = "";
+      noticeCode = "";
       modelDraft = result?.model?.provider_id || "";
       await loadStepData(result);
       loaded = true;
@@ -3864,6 +3880,7 @@ window.CompanionSetup = (() => {
     if (job) legacyJobs.set(action, job);
     else busy = true;
     notice = "";
+    noticeCode = "";
     render();
     try {
       if (action === "confirm-binding") {
@@ -3968,6 +3985,7 @@ window.CompanionSetup = (() => {
       notice = action.startsWith("legacy-")
         ? legacyDisplayText(errorText(error, "操作未完成，请重新读取状态。"))
         : errorText(error, "操作未完成，请重新读取状态。");
+      noticeCode = typeof error?.code === "string" ? error.code : "";
       if (!migrationOnly) {
         try { state = await api("GET", "/status"); } catch { state = null; }
       }
@@ -4729,6 +4747,7 @@ window.CompanionSetup = (() => {
     root.addEventListener("input", onInput);
     state = null;
     notice = "";
+    noticeCode = "";
     modelDraft = "";
     modelTasks = null;
     modelTasksStatus = "idle";

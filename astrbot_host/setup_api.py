@@ -291,6 +291,26 @@ def _settle_failed_stages(stages, stage):
     return failed
 
 
+# Configuration writes are fenced on the current supervisor generation.  A fence
+# that reaches the operator as "宿主刚刚重启或重载" is only true when something
+# actually restarted; when it is not, retrying can never work and the message
+# sends them hunting the wrong problem.  Translate it into the one action that
+# does help.
+_WRITE_FENCE_CODES = frozenset({"supervisor_fenced", "supervisor_generation_conflict",
+                                "host_not_running", "staging_not_running"})
+
+
+def _actionable_write_failure(error: TaskError) -> tuple[str, str]:
+    """Map a fenced or unstartable runtime to the action that unblocks the save."""
+    if error.code == "setup_host_start_failed":
+        return ("setup_host_not_running",
+                "运行实例没能启动，本次保存没有生效；请点「重新连接」，等实例运行后再保存一次。")
+    if error.code in _WRITE_FENCE_CODES:
+        return ("setup_host_not_running",
+                "当前运行实例已失效，本次保存没有生效；请点「重新连接」，等实例运行后再保存一次。")
+    return error.code, str(error)
+
+
 class SetupWebAPI:
     def __init__(self, controller):
         self.controller = controller
@@ -1037,6 +1057,32 @@ class SetupWebAPI:
         except TaskError as error:
             return self._error(error.code, str(error))
 
+    async def _ensure_runtime(self) -> None:
+        """Guarantee a running application backs the editors that fence writes.
+
+        ``GroupEditor.configure()`` requires the current supervisor generation.
+        A session that was assembled but never started has
+        ``application.state == "new"`` and no generation, and no
+        ``task_supervisor`` row exists yet, so every save answered
+        ``supervisor_fenced`` — surfaced as "宿主刚刚重启或重载" — no matter how
+        often the operator retried, although nothing had restarted.  The
+        onboarding guide can legitimately reach the profile step in that state,
+        so start the runtime first, the way the proactive diagnostic already
+        does, and report a real reason when the start itself fails.
+        """
+        session = self.controller.session or self.controller.last_session
+        application = getattr(session, "application", None) if session is not None else None
+        if application is not None and getattr(application, "state", None) == "running":
+            return
+        try:
+            started = await self.controller.start()
+        except TaskError:
+            raise
+        except Exception as error:  # noqa: BLE001 - a failed start must not read as a fence
+            raise TaskError("setup_host_start_failed", "the runtime could not be started") from error
+        if started.failure is not None and started.failure.code != "host_already_started":
+            raise TaskError("setup_host_start_failed", started.failure.reason)
+
     async def save_profile(self):
         try:
             username = self._admin()
@@ -1048,6 +1094,7 @@ class SetupWebAPI:
                     or len(data["operation_key"]) > 128 or type(data["edit_token"]) is not str
                     or len(data["edit_token"]) != 64 or type(changes) is not dict or not changes):
                 raise ValueError("invalid profile patch")
+            await self._ensure_runtime()
             session, context, _instruction = await self._setup_context()
             from companion_v2.configuration.management import RoleProfileManagement, RelationshipProfileManagement
             editor_type = RoleProfileManagement if target == "role_profile" else RelationshipProfileManagement
@@ -1055,7 +1102,7 @@ class SetupWebAPI:
                 self._operator(self.controller, username), {key: data[key] for key in ("operation_key", "edit_token", "changes")}))
             return self._response(Outcome.success(saved))
         except TaskError as error:
-            return self._error(error.code, str(error))
+            return self._error(*_actionable_write_failure(error))
         except (ValueError, TypeError, KeyError, OSError, UnicodeError):
             return self._error("setup_profile_invalid", "review the draft fields and save with the current profile version")
 

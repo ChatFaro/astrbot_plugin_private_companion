@@ -733,6 +733,29 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["status"], "ok", saved)
         self.assertEqual(saved["data"]["task"]["configuration_layer"], "role")
 
+    async def test_profile_save_round_trips_after_model_setup(self):
+        """第 3 步「世界知识」的保存必须真的写进去。
+
+        这条路径此前没有任何端到端用例：唯一一条 save_profile 用例把
+        _setup_context 整个换掉了，只验到「请求体能被接受」。于是「保存后
+        报宿主重启/重载（supervisor_fenced）」在测试里完全不可见。
+        """
+        await self.enter_model_step()
+        self.assertEqual((await self.call("model", {"provider_id": "native-model"}))["status"], "ok")
+
+        profiles = await self.call("profile")
+        self.assertEqual(profiles["status"], "ok", profiles)
+        token = profiles["data"]["role_profile"]["edit_token"]
+        self.assertTrue(token)
+
+        saved = await self.call("save_profile", {
+            "target": "role_profile", "operation_key": "setup-profile-roundtrip",
+            "edit_token": token, "changes": {"name": "沈知夏"}})
+        self.assertEqual(saved["status"], "ok", saved)
+
+        again = await self.call("profile")
+        self.assertEqual(again["data"]["role_profile"]["settings"]["name"], "沈知夏")
+
     async def test_reset_binding_releases_the_confirmed_window_and_keeps_the_mapping(self):
         """🔴 `companion_unbind` 让操作员「先在开始使用里重置首次设置」，而此前没有任何实现。
 
